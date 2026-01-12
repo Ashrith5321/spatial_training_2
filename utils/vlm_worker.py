@@ -5,8 +5,12 @@ import time
 import gc
 import copy
 import os
-from typing import Optional, Any
+from typing import Optional, Any, List
 from collections import defaultdict
+import torch.nn as nn
+from accelerate import Accelerator
+from torch.optim import AdamW
+from dataclasses import dataclass,field
 # from transformers.models.qwen3_vl.modeling_qwen3_vl import rotate_half
 
 class VLMWorker:
@@ -209,12 +213,13 @@ class VLMWorker:
             patch_coords = self.bev_canvas_size//2*torch.ones(1,3,1)
             position_ids = get_pos_id(self.cumulative_inputs['input_ids'],patch_coords.to(self.cumulative_inputs['input_ids'].dtype),self.processor,self.bev_canvas_size)
         return position_ids
+
     def _store_outputs(self, outputs):
         """
         Extracts cached tensors from ModelOutput and appends them to the rollout buffer.
         """
         # 1. Standard Tensors (Append to list, concatenate later)
-        # These are already on CPU thanks to your TextModel code
+        # These are already on CPU thanks to the TextModel code
         self.outputs['input_embeds'].append(outputs.input_embeds)
         self.outputs['position_ids'].append(outputs.position_ids)
         self.outputs['visual_pos_masks'].append(outputs.visual_pos_masks)
@@ -230,6 +235,7 @@ class VLMWorker:
             # Append Layer K's tensor to the Kth list
             for layer_idx, layer_tensor in enumerate(outputs.deepstack_inputs):
                 self.outputs['deepstack_inputs'][layer_idx].append(layer_tensor)
+
     def infer_step(self,messages,images,full_logprobs=False,temperature=1.2,check_probs=True,crop_inputs=True,pos_id_kwargs=None):
         if self.model is None:
             self.load_model()
@@ -258,6 +264,7 @@ class VLMWorker:
             turn_inputs['attention_mask'] = self.cumulative_inputs['attention_mask'].to(self.device)
         if self.save_outputs:
             turn_inputs['save_embeds'] = True
+
         with torch.inference_mode():
             # t0 = time.time()
             outputs = self.model.forward(
@@ -305,23 +312,25 @@ class VLMWorker:
         probs /= np.sum(probs)
         return probs
 
-from dataclasses import dataclass
 
 @dataclass
 class VLMTrainingConfig:
     # Optimization
-    learning_rate: float = 1e-4
+    learning_rate: float = 5e-6
     grad_accum_steps: int = 1
     mixed_precision: str = "fp16"
     gradient_checkpointing: bool = True
+
+    # Value Head Configuration
+    value_head_learning_rate: float = 5e-4  # Often higher than Adapter LR
+    value_head_dropout: float = 0.1
+    # List of hidden layer sizes. Empty list [] implies a single linear layer (Linear Probe).
+    value_head_hidden_dims: List[int] = field(default_factory=list)
     # PEFT: Pass the actual configuration object here (e.g., LoraConfig)
     # Typed as Any to avoid crashing if peft isn't installed on the driver
     peft_config: Optional[Any] = None
     
-import os
-import torch
-from accelerate import Accelerator
-from torch.optim import AdamW
+
 
 # Handle optional PEFT imports gracefully
 try:
@@ -329,6 +338,46 @@ try:
     PEFT_AVAILABLE = True
 except ImportError:
     PEFT_AVAILABLE = False
+
+class ValueHead(nn.Module):
+    """
+    A configurable MLP Value Head.
+    """
+    def __init__(self, input_dim: int, hidden_dims: List[int], dropout: float = 0.1):
+        super().__init__()
+        layers = []
+        curr_dim = input_dim
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(curr_dim, h_dim))
+            layers.append(nn.Mish()) # why not
+            layers.append(nn.Dropout(dropout))
+            curr_dim = h_dim
+        # Final projection to scalar value
+        layers.append(nn.Linear(curr_dim, 1))
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.mlp(x)
+
+@dataclass
+class RLBatch:
+    """
+    Represents a batch of full sequences (B, T) ready for training.
+    """
+    # --- Static Data (From Rollout) ---
+    input_ids: torch.Tensor          # (B, T) - For logging/masks
+    inputs_embeds: torch.Tensor      # (B, T, D) - Cached from Worker (Heavy)
+    attention_mask: torch.Tensor     # (B, T)
+    response_mask: torch.Tensor      # (B, T) - 1 for generated tokens, 0 for prompt
+    
+    actions: torch.Tensor            # (B, T)
+    old_log_probs: torch.Tensor      # (B, T) - π_old
+    rewards: torch.Tensor            # (B, T) - Dense rewards at every step
+    
+    # --- Computed Data (Filled by Driver) ---
+    values: Optional[torch.Tensor] = None     # (B, T) - V(s)
+    advantages: Optional[torch.Tensor] = None # (B, T) - A(s,a)
+    returns: Optional[torch.Tensor] = None    # (B, T) - Target for Value Head
 
 class VLMTrainingMixin:
     def setup_training(self, config: VLMTrainingConfig,rank: int,
@@ -338,6 +387,9 @@ class VLMTrainingMixin:
         """
         Sets up distributed training using the provided TrainConfig.
         """
+        from accelerate import DistributedDataParallelKwargs
+
+        kwargs = DistributedDataParallelKwargs(find_unused_parameters=False) #prevent value head from being killed
         # 1. Manual Environment Injection for Ray
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(master_port)
@@ -348,7 +400,8 @@ class VLMTrainingMixin:
         # 2. Initialize Accelerator
         self.accelerator = Accelerator(
             gradient_accumulation_steps=config.grad_accum_steps,
-            mixed_precision=config.mixed_precision
+            mixed_precision=config.mixed_precision,
+            kwargs_handlers=[kwargs]
         )
 
         # 3. Gradient Checkpointing (Must run before PEFT wrapping)
@@ -360,21 +413,50 @@ class VLMTrainingMixin:
                 self.model.enable_input_require_grads() # use_reentrant=False to prevent hangs
             else:
                 raise NotImplementedError("Model does not support 'enable_input_require_grads' method.")
+        hidden_size = self.model.language_model.config.hidden_size
+        
+        self.model.value_head = ValueHead(
+            input_dim=hidden_size,
+            hidden_dims=config.value_head_hidden_dims,
+            dropout=config.value_head_dropout
+        )
+        # Ensure value head is in the same dtype as the model base
+        self.model.value_head.to(self.model.dtype)
         # 4. Apply PEFT (if config provided)
         if config.peft_config is not None:
             if not PEFT_AVAILABLE:
                 raise ImportError("TrainConfig has peft_config, but 'peft' library is not installed.")
             # Direct application of the config object
+            # CRITICAL: Add 'value_head' to modules_to_save so PEFT treats it as 
+            # a full-rank trainable module (not an adapter) and saves it in the checkpoint.
+            if config.peft_config.modules_to_save is None:
+                config.peft_config.modules_to_save = []
+            if "value_head" not in config.peft_config.modules_to_save:
+                print("saving value head")
+                config.peft_config.modules_to_save.append("value_head")
             self.model = get_peft_model(self.model, config.peft_config)
             # Print trainable parameters to verify LoRA is active
             if self.accelerator.is_local_main_process:
                 self.model.print_trainable_parameters()
         # 5. Create Optimizer
         # Only optimize parameters that require gradients (i.e., the Adapters)
-        optimizer = AdamW(
-            filter(lambda p: p.requires_grad, self.model.parameters()), 
-            lr=config.learning_rate
-        )
+
+        head_params = [p for n, p in self.model.named_parameters() if "value_head" in n and p.requires_grad]
+        rest_params = [p for n, p in self.model.named_parameters() if "value_head" not in n and p.requires_grad]
+
+        optimizer_grouped_parameters = [
+            {
+                "params": head_params,
+                "lr": config.value_head_learning_rate,
+                "name": "value_head"
+            },
+            {
+                "params": rest_params,
+                "lr": config.learning_rate,
+                "name": "adapters"
+            }
+        ]
+        optimizer = AdamW(optimizer_grouped_parameters)
 
         # 6. Prepare with Accelerator
         # self.ddp_model becomes the sync-wrapper
@@ -383,7 +465,7 @@ class VLMTrainingMixin:
             self.model, optimizer
         )
         
-    def train_step(self, batch):
+    def train_sft_step(self, batch):
         """
         Standard training step.
         """
@@ -400,7 +482,6 @@ class VLMTrainingMixin:
             
             self.optimizer.step()
             self.optimizer.zero_grad()
-
         return loss.item()
 
     def save_adapter(self, path):
@@ -417,6 +498,7 @@ class VLMTrainingMixin:
             unwrapped = self.accelerator.unwrap_model(self.ddp_model)
             unwrapped.save_pretrained(path)
             print(f"Adapters saved to {path}")
+
 class DataGenerator:
     """Generates synthetic turn data."""
     def __init__(self, width=640, height=480, processor=None):

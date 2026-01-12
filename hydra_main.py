@@ -1,15 +1,16 @@
 import hydra
-import json
-import os
 from config_schema import InferenceConfig
 from conf.register_configs import register_configs
-from utils.factories import InferenceBootstrapper,get_shard_iterator,get_console_logger
-from utils.inference_core import run_inference_driver
-# 1. Register our variants (Qwen vs Llama, local vs cluster, etc.)
+
+# 1. Register our command variants
 register_configs()
 
 @hydra.main(version_base=None, config_name="inference_config")
 def main(cfg: InferenceConfig):
+    import json
+    import os
+    from utils.factories import InferenceBootstrapper,get_shard_iterator,get_console_logger
+    from utils.inference_core import run_inference_driver
     # 2. Setup Ray and Workers
     bootstrapper = InferenceBootstrapper(cfg)
     vlm_handles, sim_handles, logger_handle = bootstrapper.bootstrap_all()
@@ -40,7 +41,8 @@ def main(cfg: InferenceConfig):
     finally:
         if logger_handle:
             import time
-            time.sleep(10) # Minimal wait for WandB
+            time.sleep(30) # wait for WandB
+            ray.get(logger_handle.close.remote())
         import ray
         ray.shutdown()
 

@@ -75,8 +75,28 @@ def substitute_convo_template(conversation_template: List[Dict], substitutions: 
     return new_conversation
 
 class EpisodeRolloutMixin:
-    def run_episode(self,habitat_handle, initial_state_ref):
+    def _pack_trajectory(self, buffer: List[Dict]) -> Dict[str, np.ndarray]:
+        """
+        Converts list of dicts to a dict of numpy arrays (Columnar format).
+        This format allows Ray to zero-copy transfer individual columns.
+        """
+        if not buffer:
+            return {}
+        
+        # Fast dictionary of lists to list of dictionaries inversion
+        keys = buffer[0].keys()
+        stacked = {k: np.array([d[k] for d in buffer]) for k in keys}
+        
+        # Optimization: Cast probabilities to float32 to save 50% bandwidth
+        if "action_probs" in stacked:
+            stacked["action_probs"] = stacked["action_probs"].astype(np.float32)
+        if "rewards" in stacked:
+             stacked["rewards"] = stacked["rewards"].astype(np.float32)
+            
+        return stacked
+    def run_episode(self,habitat_handle, initial_state_ref,collect_trajectory=False):
         import time
+        self.reset() #we reset at the start to ensure clean state. not resetting at the end preserves state for downstream.
         try:
             # 1. Resolve the initial state (Blocking wait for reset to finish)
             # Ray automatically waits for initial_state_ref to be ready before starting this task,
@@ -98,6 +118,8 @@ class EpisodeRolloutMixin:
             messages = substitute_convo_template(self.rollout_config['convo_start_template'],state_dict['obs'] | self.rollout_config)
             # 2. The Interaction Loop
             vlm_logs={}
+            # Trajectory Buffer (List is fine here!)
+            trajectory_buffer = []
             goal_name = state_dict['obs']['goal_name']
             while not done and step_count < self.rollout_config['max_steps']:
                 # A. Prepare VLM Input
@@ -116,10 +138,12 @@ class EpisodeRolloutMixin:
                 action_id = np.random.choice(len(action_probs),p=action_probs) # sampling
                 entropy = -np.sum(action_probs * np.log(action_probs + 1e-9))
                 vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':action_probs[action_id]} 
-                del rgb,state_dict
+                # D. Store Transition
+               
 
                 # D. Step Simulator (Blocking) ---------------------------RAY----------------------------- 
                 t0 = time.time()
+                # del rgb,state_dict
                 state_ref = ray.get(habitat_handle.step.remote(action_id,supplementary_logs=vlm_logs))
                 if len(state_ref)==2:
                     rgb,state_dict = state_ref
@@ -128,29 +152,74 @@ class EpisodeRolloutMixin:
                     pos_id_kwargs['patch_coords'] = patch_coords
                     pos_id_kwargs['mode'] = "bev"
                 vlm_logs = {'mean/sim_latency':time.time()-t0,'min/sim_latency':time.time()-t0,'max/sim_latency':time.time()-t0}
+                if collect_trajectory:
+                    # Append dict to list - fast and simple
+                    trajectory_buffer.append({
+                        "actions": action_id,
+                        "action_probs": action_probs, 
+                        "rewards": state_dict.get("reward", 0.0),
+                        "dones": state_dict['done']
+                    })
 
                 messages = substitute_convo_template(self.rollout_config['convo_turn_template'],{"action":self.rollout_config['action_space'][action_id]})
                 # print(f"sim step{step_count}")
                 done = state_dict['done']
                 step_count += 1
-            return habitat_handle,state_dict['is_exhausted'], state_dict['info'] | {"steps":step_count, "goal_name":goal_name}
+                # Convert list of dicts -> Dict of Numpy Arrays (Zero-Copy Friendly)
+            final_trajectory = self._pack_trajectory(trajectory_buffer) if collect_trajectory else None
+            final_info = state_dict['info'] | {"steps":step_count, "goal_name":goal_name}
+            # Return Clean Tuple (No Actor Handles here)
+            return habitat_handle, state_dict['is_exhausted'], final_info, final_trajectory
         
         except Exception as e:
             print(f"Episode failed: {e}")
             import traceback
             traceback.print_exc()
             # Return handles anyway so we don't leak resources (or handle crash logic)
-            return habitat_handle,False, None
-        finally:
-            self.reset()
+            return habitat_handle,False, None,None
 
-class EpisodeRolloutMixinRay(EpisodeRolloutMixin):
+class RolloutWorker(VLMWorker, EpisodeRolloutMixin):
+    def __init__(self, rollout_config: Dict[str, Any], **vlm_kwargs):
+        """
+        Explicitly handles argument separation to avoid MRO issues.
+        
+        Args:
+            rollout_config: Arguments intended for the EpisodeRolloutMixin.
+            **vlm_kwargs: All other arguments (model_id, dtype, etc.) passed to VLMWorker.
+        """
+        # 1. Initialize the VLM Worker (The Heavy Lifter)
+        # We pass only the relevant VLM args to avoid 'unexpected keyword argument' errors.
+        VLMWorker.__init__(self, **vlm_kwargs)
+        
+        # 2. Initialize the Mixin State
+        # Since the Mixin's __init__ was just setting this variable, we can do it here directly
+        # effectively bypassing the need for cooperative inheritance in the parents.
+        self.rollout_config = rollout_config
+
+class InferenceRayWorker(RolloutWorker):
     def run_episode(self,habitat_handle, initial_state_ref):
-        habitat_handle,is_exhausted,state_dict = super().run_episode(habitat_handle, initial_state_ref)
-        return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
-    
-# from utils.logging_worker import LoggingHabitatWorker
+        habitat_handle,is_exhausted,final_info,_ = super().run_episode(habitat_handle, initial_state_ref)
+        return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,final_info
 
+class RLWorker(RolloutWorker,VLMTrainingMixin):
+    def __init__(self, rollout_config: Dict[str, Any], **vlm_kwargs):
+        """
+        Combines VLM inference, RL Data Collection, and Training capabilities.
+        """
+        # 1. Initialize VLM (Heavy weights)
+        VLMWorker.__init__(self, **vlm_kwargs)
+        
+        # 2. Initialize Rollout Config
+        self.rollout_config = rollout_config
+    def run_episode(self,habitat_handle,initial_state_ref):
+        results = super().run_episode(habitat_handle, initial_state_ref,collect_trajectory=True)
+        return results #does this work properly for tuple?
+
+class RLRayWorker(RLWorker):
+    def run_episode(self,habitat_handle,initial_state_ref):
+        habitat_handle,is_exhausted,state_dict,trajectory = super().run_episode(habitat_handle, initial_state_ref)
+        return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict,trajectory
+        
 class HabitatRayWorker(LoggingHabitatWorker):
     """
     Ray Actor wrapper for the LoggingHabitatWorker.
@@ -209,44 +278,6 @@ class HabitatRayWorker(LoggingHabitatWorker):
             patch_coords = result['obs'].pop('patch_coords')
             return rgb,patch_coords,result
 
-class InferenceRayWorker(VLMWorker, EpisodeRolloutMixinRay):
-    def __init__(self, rollout_config: Dict[str, Any], **vlm_kwargs):
-        """
-        Explicitly handles argument separation to avoid MRO issues.
-        
-        Args:
-            rollout_config: Arguments intended for the EpisodeRolloutMixin.
-            **vlm_kwargs: All other arguments (model_id, dtype, etc.) passed to VLMWorker.
-        """
-        # 1. Initialize the VLM Worker (The Heavy Lifter)
-        # We pass only the relevant VLM args to avoid 'unexpected keyword argument' errors.
-        VLMWorker.__init__(self, **vlm_kwargs)
-        
-        # 2. Initialize the Mixin State
-        # Since the Mixin's __init__ was just setting this variable, we can do it here directly
-        # effectively bypassing the need for cooperative inheritance in the parents.
-        self.rollout_config = rollout_config
-        
-class InferenceWorker(VLMWorker, EpisodeRolloutMixin):
-    def __init__(self, rollout_config: Dict[str, Any], **vlm_kwargs):
-        """
-        Explicitly handles argument separation to avoid MRO issues.
-        
-        Args:
-            rollout_config: Arguments intended for the EpisodeRolloutMixin.
-            **vlm_kwargs: All other arguments (model_id, dtype, etc.) passed to VLMWorker.
-        """
-        # 1. Initialize the VLM Worker (The Heavy Lifter)
-        # We pass only the relevant VLM args to avoid 'unexpected keyword argument' errors.
-        VLMWorker.__init__(self, **vlm_kwargs)
-        
-        # 2. Initialize the Mixin State
-        # Since the Mixin's __init__ was just setting this variable, we can do it here directly
-        # effectively bypassing the need for cooperative inheritance in the parents.
-        self.rollout_config = rollout_config
-        
-class RLWorker(InferenceWorker,VLMTrainingMixin):
-    pass
 
 def run_inference_driver(
     sim_handles: List[Any],
