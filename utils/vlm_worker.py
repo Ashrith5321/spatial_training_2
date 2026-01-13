@@ -317,11 +317,14 @@ class VLMWorker:
     def infer_step(self,messages,images,full_logprobs=False,temperature=1.2,check_probs=True,crop_inputs=True,pos_id_kwargs=None):
         t0 = time.time()
         self.model.gradient_checkpointing_disable()
+        self.model.eval()
+
         if self.model is None:
             self.load_model()
             self.reset()
         if self.using_lora() and not self.is_merged():
             self.merge_adapter() # for inference speed
+            pass
         # print(f"lora merge time: {time.time()-t0}",end=" ")
         
         t = time.time()
@@ -466,9 +469,9 @@ class ValueHead(nn.Module):
         # Final projection to scalar value
         final_proj = nn.Linear(curr_dim, 1,dtype=dtype)
         # Initialize to zero for 0 value at start
-        with torch.no_grad():
-            final_proj.weight.fill_(0.)
-            final_proj.bias.fill_(0.)
+        # with torch.no_grad():
+        #     final_proj.weight.fill_(0.)
+        #     final_proj.bias.fill_(0.)
         layers.append(final_proj)
         self.mlp = nn.Sequential(*layers)
         self.dtype = dtype
@@ -729,9 +732,9 @@ class VLMTrainingMixin:
         self.ddp_model.train()
         if self.is_merged():
             self.unmerge_adapter()
-            if self.gradient_checkpointing:
-                self.model.gradient_checkpointing_enable({"use_reentrant": False})
-            self.reset() #clear internal state, training is (mostly) stateless
+        if self.gradient_checkpointing:
+            self.model.gradient_checkpointing_enable({"use_reentrant": False})
+        self.reset() #clear internal state, training is (mostly) stateless
         self.accelerator.wait_for_everyone() # ensure all workers have unmerged before training
         # Accumulate gradients (handle micro-batches)
         with self.accelerator.accumulate(self.ddp_model):
@@ -772,7 +775,7 @@ class VLMTrainingMixin:
                 loss = pg_loss
 
             if self.rl_algo_config.entropy_bonus is not None:
-                entropy_loss = compute_entropy_loss(logits,response_mask)*self.rl_algo_config.entropy_bonus
+                entropy_loss = -compute_entropy_loss(logits,response_mask)*self.rl_algo_config.entropy_bonus
                 metrics['train/entropy_loss'] = entropy_loss.detach().item()
                 loss = loss+entropy_loss
                 

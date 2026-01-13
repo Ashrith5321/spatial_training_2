@@ -50,7 +50,7 @@ class RLConfig:
     
     # Value & Entropy
     cliprange_value: float = 0.2
-    entropy_bonus: float = -0.01
+    entropy_bonus: float = 0.0
 
     # # Compatibility for verl's agg_loss
     # @property
@@ -75,7 +75,7 @@ class HydraLoraConfig:
     """
     r: int = 128
     lora_alpha: int = 256
-    lora_dropout: float = 0.05
+    lora_dropout: float = 0.01
     bias: str = "none"
     task_type: str = "CAUSAL_LM"
     
@@ -97,10 +97,10 @@ class VLMTrainingConfig:
 
     # Value Head Configuration
     value_head_learning_rate: float = 5e-4  # Often higher than Adapter LR
-    value_head_dropout: float = 0.1
+    value_head_dropout: float = 0.01
     value_head_dtype: str = "float32"  
     # List of hidden layer sizes. Empty list [] implies a single linear layer (Linear Probe).
-    value_head_hidden_dims: List[int] = field(default_factory=list)
+    value_head_hidden_dims: List[int] = field(default_factory=lambda:[1024,512])
 
     # PEFT: Pass the actual configuration object here (e.g., LoraConfig)
     # Typed as Any to avoid crashing if peft isn't installed on the driver

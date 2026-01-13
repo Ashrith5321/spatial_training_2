@@ -13,7 +13,7 @@ import numpy as np
 
 # Placeholder import for verl GAE
 try:
-    from verl.trainer.ppo.core_algos import compute_gae_advantage_return
+    from verl.trainer.ppo.core_algos import compute_gae_advantage_return,get_adv_estimator_fn,AdvantageEstimator,POLICY_LOSS_REGISTRY
 except ImportError:
     # If you haven't installed verl in this env yet, paste the function definition 
     # from the previous turn here.
@@ -27,7 +27,7 @@ register_configs()
 with initialize(version_base=None, config_path="conf"):
     # Here you can list overrides just like you would on the CLI
     cfg = compose(config_name="rl_config", overrides=[
-        "task.run_name=test_rl_2",
+        "task.run_name=test_rl_reinforce_plus_plus",
         "task.wandb_project=rl_dev",
         "rollout.max_steps=200",
         "vlm.save_outputs=True", # need this for RL
@@ -37,7 +37,10 @@ with initialize(version_base=None, config_path="conf"):
         "resources.num_vlms=3",
         "resources.num_sims=4",
         "resources.master_port=25653",
+        f"training.rl_config.advantage_estimator={AdvantageEstimator.REINFORCE_PLUS_PLUS}",
+        # "training.rl_config.policy_loss_name="
     ])
+advantage_estimator_fn = get_adv_estimator_fn(cfg.training.rl_config.advantage_estimator)
 
 print(f"Model ID: {cfg.vlm.model_id}")
 bootstrapper = ExpBootstrapper(cfg)
@@ -84,15 +87,16 @@ try:
 
         # ---------------------------------- compute gae ----------------------------------------------
         print("Computing GAE...")
-        config = bootstrapper.resolved_dict['training'] 
+        config = bootstrapper.resolved_dict['training']['rl_config']
 
         # Note: compute_gae expects (B, T) inputs and returns (B, T)
-        advantages, returns = compute_gae_advantage_return(
+        advantages, returns = advantage_estimator_fn(
             token_level_rewards=traj_batch['rewards'],
-            values=traj_batch['values'],
+            # values=traj_batch['values'],
             response_mask=traj_batch['response_mask'],
-            gamma=config.get('gamma', 0.99), # Fallback defaults if not in config
-            lam=config.get('lam', 0.95)
+            config = cfg.training.rl_config,
+            # gamma=config.get('gamma', 0.99), # Fallback defaults if not in config
+            # lam=config.get('lam', 0.95)
         )
 
         traj_batch['advantages'] = advantages
@@ -151,5 +155,10 @@ try:
                     logger.error(f"[{completed_count}/{total_tasks}] Task failed: {e}")
 
 finally:
-    
+    for trainer in trainers:
+        ray.kill(trainer)
+    for sim in sims:
+        ray.kill(sim)
+    if wandb_actor is not None:
+        ray.kill(wandb_actor)
     ray.shutdown()
