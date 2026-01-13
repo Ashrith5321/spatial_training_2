@@ -427,7 +427,7 @@ class HabitatWorker:
             self.steps['action'].append(action)
         self.last_step = step_dict
         # print(f"postprocessing took {time.time()-t0}")
-        return self._apply_schema(step_dict,self.output_schema)
+        return self._apply_schema(step_dict |extras,self.output_schema)
 
     def get_last_step(self,output_schema=None):
         """Returns the current observation without stepping the environment."""

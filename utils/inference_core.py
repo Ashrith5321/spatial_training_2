@@ -88,13 +88,13 @@ class EpisodeRolloutMixin:
         stacked = {k: np.array([d[k] for d in buffer]) for k in keys}
         
         # Optimization: Cast probabilities to float32 to save 50% bandwidth
-        if "action_probs" in stacked:
+        if "probs" in stacked:
             stacked["action_probs"] = stacked["action_probs"].astype(np.float32)
         if "rewards" in stacked:
              stacked["rewards"] = stacked["rewards"].astype(np.float32)
             
         return stacked
-    def run_episode(self,habitat_handle, initial_state_ref,collect_trajectory=False):
+    def run_episode(self,habitat_handle, initial_state_ref,collect_trajectory=False,compute_value=False):
         import time
         self.reset() #we reset at the start to ensure clean state. not resetting at the end preserves state for downstream.
         try:
@@ -130,7 +130,7 @@ class EpisodeRolloutMixin:
                 # print("inferring VLM with messages:")
                 # print(messages)
                 t0 = time.time()
-                action_probs = self.infer_probs(images=[rgb_pil],messages=messages,temperature = self.rollout_config['temperature'],pos_id_kwargs=pos_id_kwargs)
+                action_probs,action_logprobs,outputs = self.infer_probs(images=[rgb_pil],messages=messages,temperature = self.rollout_config['temperature'],pos_id_kwargs=pos_id_kwargs)
                 vlm_logs |= {'mean/vlm_latency':time.time()-t0,'min/vlm_latency':time.time()-t0,'max/vlm_latency':time.time()-t0}
                 # print(f"vlm step{step_count}")
                 # print("done")
@@ -154,12 +154,19 @@ class EpisodeRolloutMixin:
                 vlm_logs = {'mean/sim_latency':time.time()-t0,'min/sim_latency':time.time()-t0,'max/sim_latency':time.time()-t0}
                 if collect_trajectory:
                     # Append dict to list - fast and simple
-                    trajectory_buffer.append({
+                    trajectory_dict = {
                         "actions": action_id,
-                        "action_probs": action_probs, 
+                        "rollout_logprobs": action_logprobs,
+                        "rollout_probs": action_probs,
                         "rewards": state_dict.get("reward", 0.0),
                         "dones": state_dict['done']
-                    })
+                    }
+                    if compute_value:
+                        import torch
+                        # Compute value estimate for the current state
+                        with torch.no_grad():
+                            trajectory_dict["values"] = self._compute_value(outputs).cpu().numpy()
+                    trajectory_buffer.append(trajectory_dict)
 
                 messages = substitute_convo_template(self.rollout_config['convo_turn_template'],{"action":self.rollout_config['action_space'][action_id]})
                 # print(f"sim step{step_count}")
@@ -211,15 +218,58 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
         
         # 2. Initialize Rollout Config
         self.rollout_config = rollout_config
-    def run_episode(self,habitat_handle,initial_state_ref):
-        results = super().run_episode(habitat_handle, initial_state_ref,collect_trajectory=True)
-        return results #does this work properly for tuple?
-
+        
+    def run_episode(self,habitat_handle,initial_state_ref,rtn_inputs = False,rtn_embeds=True):
+        '''
+        stateful run episode. stores the trajectory and sequence level model inputs internally so we can release the habitat ref, and later calculate the logprobs.
+        '''
+        self.rl_seq_inputs = None
+        self.rl_embeds_inputs = None
+        self.rl_trajectory = None
+        if rtn_inputs:
+            self.save_pixels = True #need pixels to reconstruct sequence inputs.
+        else:
+            self.save_pixels = False
+        habitat_handle,is_exhausted,state_dict,trajectory = super().run_episode(habitat_handle, initial_state_ref,collect_trajectory=True,compute_value=False)
+        self.rl_trajectory = trajectory
+        inputs,embeds = None,None
+        if rtn_embeds:
+            embeds = self._pack_embeds()
+            self.rl_embeds_inputs = embeds
+        if rtn_inputs:
+            inputs = self._pack_inputs()
+            self.rl_seq_inputs = inputs
+        return habitat_handle,is_exhausted,state_dict,trajectory,inputs,embeds
+    
+    def postprocess_episode(self):
+        '''
+        clears the internal state and returns the processed trajectory and model inputs.
+        - trajectory includes: 
+            - rollout logprobs (for rollout correction)
+            - old logprobs (calculated from same weights as rollout model but with full forward pass instead of kv cache)
+        '''
+        model_inputs = None
+        values = None
+        import torch
+        with torch.no_grad():
+            if self.rl_embeds_inputs is not None:
+                logits,values = self._forward_embeds(self.rl_embeds_inputs,None,self.rl_algo_config.use_value)
+                model_inputs = self.rl_embeds_inputs
+            elif self.rl_seq_inputs is not None:
+                logits,values = self._forward_seq(self.rl_seq_inputs,None,self.config.rl_algo_config.use_value)
+                model_inputs = self.rl_seq_inputs
+            else:
+                raise ValueError("No stored model inputs found for postprocessing.")
+        logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
+        self.rl_trajectory['old_logprobs'] = logprobs
+        self.rl_trajectory['values'] = values
+        return self.rl_trajectory,model_inputs    
+    
 class RLRayWorker(RLWorker):
     def run_episode(self,habitat_handle,initial_state_ref):
-        habitat_handle,is_exhausted,state_dict,trajectory = super().run_episode(habitat_handle, initial_state_ref)
-        return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict,trajectory
-        
+        habitat_handle,is_exhausted,state_dict,_,_,_ = super().run_episode(habitat_handle, initial_state_ref)
+        return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
+
 class HabitatRayWorker(LoggingHabitatWorker):
     """
     Ray Actor wrapper for the LoggingHabitatWorker.

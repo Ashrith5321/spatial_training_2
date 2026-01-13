@@ -209,8 +209,8 @@ class Qwen3VLSparseTextModel(Qwen3VLTextModel):
         self.seq_keep_mask = None
         self.vis_keep_mask = None
         # Save original inputs to LM
-        self.input_embeds = None
-        self.deepstack_inputs = None
+        self.inputs_embeds = None
+        self.deepstack_visual_embeds = None
         self.visual_pos_masks = None
         self.position_ids = None
         # 1. Determine Sequence Length
@@ -297,7 +297,7 @@ class Qwen3VLSparseTextModel(Qwen3VLTextModel):
                     # Fallback: If mask length equals chunk length (e.g. first step), filter normally
                     attention_mask = attention_mask[:, seq_keep_mask]
             position_ids = position_ids[:,:,seq_keep_mask]#.detach()
-            input_embeds = apply_mask(inputs_embeds)#.detach()
+            inputs_embeds = apply_mask(inputs_embeds)#.detach()
             # input_embeds.requires_grad_()
             visual_pos_masks = apply_mask(visual_pos_masks)#.detach()
             self.seq_keep_mask = seq_keep_mask.cpu()
@@ -307,7 +307,7 @@ class Qwen3VLSparseTextModel(Qwen3VLTextModel):
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            inputs_embeds=input_embeds,
+            inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             cache_position=cache_position,
             visual_pos_masks=visual_pos_masks, 
@@ -317,8 +317,8 @@ class Qwen3VLSparseTextModel(Qwen3VLTextModel):
         
         if save_embeds:
             self.position_ids = position_ids.cpu() if position_ids is not None else None
-            self.input_embeds = input_embeds.cpu() if input_embeds is not None else None
-            self.deepstack_inputs = [v.cpu() for v in deepstack_visual_embeds] if deepstack_visual_embeds is not None else None
+            self.inputs_embeds = inputs_embeds.cpu() if inputs_embeds is not None else None
+            self.deepstack_visual_embeds = [v.cpu() for v in deepstack_visual_embeds] if deepstack_visual_embeds is not None else None
             self.visual_pos_masks = visual_pos_masks.cpu() if visual_pos_masks is not None else None
         return outputs
 
@@ -423,8 +423,8 @@ class Qwen3VLSparseForConditionalGeneration(Qwen3VLForConditionalGeneration):
             "vis_keep_mask": self.model.language_model.vis_keep_mask,
             "last_hidden_state": hidden_states, # need this for Value Head
             # cache for RL.
-            "input_embeds": self.model.language_model.input_embeds,
-            "deepstack_inputs": self.model.language_model.deepstack_inputs,
+            "inputs_embeds": self.model.language_model.inputs_embeds,
+            "deepstack_visual_embeds": self.model.language_model.deepstack_visual_embeds,
             "visual_pos_masks": self.model.language_model.visual_pos_masks,
             "position_ids": self.model.language_model.position_ids,
         })

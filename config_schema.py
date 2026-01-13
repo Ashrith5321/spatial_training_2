@@ -42,6 +42,9 @@ class HabitatConfig:
         "obs": {"rgb": True, "goal_name": True, "patch_coords": False},
         "info": {"episode_label": True, "spl": True, "success": True},
         "done": True,
+        "reward": True,
+        "stuck": True,
+        "fp_stop": True
     })
 
 @dataclass
