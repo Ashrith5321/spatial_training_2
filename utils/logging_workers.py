@@ -50,6 +50,26 @@ class WandbLoggerActor:
             self.run.log(metrics, step=step)
         else:
             self.run.log(metrics)
+    def log(self,row):
+        """
+        Processes a single episode row with namespace-based media detection.
+        """
+        # --- 4. Log Live Scalars ---
+        # Filter out heavy objects (Lists, Arrays, and the new Media objects)
+        # This keeps the "Run Overview" page clean and fast.
+        log_payload = {
+            k: v for k, v in row.items() 
+            if not isinstance(v, (list, np.ndarray, wandb.Image, wandb.Video))
+        }
+        for k, v in log_payload.items():
+            if k not in self.defined_metrics:
+                # Filter for numeric types (exclude bools, strings, and None)
+                if isinstance(v, (int, float, np.number)) and not isinstance(v, bool):
+                    self.run.define_metric(k, summary="mean")
+                    self.run.define_metric(k, summary="max")
+                    self.run.define_metric(k, summary="min")
+                    self.defined_metrics.add(k)
+        self.run.log(log_payload)
 
     def log_row(self, row:Dict[str,Any]):
         """

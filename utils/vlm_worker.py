@@ -316,7 +316,7 @@ class VLMWorker:
 
     def infer_step(self,messages,images,full_logprobs=False,temperature=1.2,check_probs=True,crop_inputs=True,pos_id_kwargs=None):
         t0 = time.time()
-
+        self.model.gradient_checkpointing_disable()
         if self.model is None:
             self.load_model()
             self.reset()
@@ -591,6 +591,7 @@ class VLMTrainingMixin:
             kwargs_handlers=[kwargs]
         )
         print("accelerator created")
+        self.gradient_checkpointing =config.gradient_checkpointing
         # 3. Gradient Checkpointing (Must run before PEFT wrapping)
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable({"use_reentrant": False})
@@ -728,6 +729,8 @@ class VLMTrainingMixin:
         self.ddp_model.train()
         if self.is_merged():
             self.unmerge_adapter()
+            if self.gradient_checkpointing:
+                self.model.gradient_checkpointing_enable({"use_reentrant": False})
             self.reset() #clear internal state, training is (mostly) stateless
         self.accelerator.wait_for_everyone() # ensure all workers have unmerged before training
         # Accumulate gradients (handle micro-batches)

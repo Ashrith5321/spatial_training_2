@@ -24,6 +24,7 @@ OmegaConf.register_new_resolver("read_text", read_text_from_file, replace=True)
 def register_configs():
     cs = ConfigStore.instance()
     cs.store(name="inference_config", node=InferenceConfig)
+    cs.store(name="rl_config",node=RLConfig)
     import conf.habitat_configs,conf.vlm_configs  # side effects (yikes)
     cs.store(name="l2", group="resources", node=ResourceConfig(num_sims=3,num_vlms=2)) #local 2 gpu
     cs.store(name="l3", group="resources", node=ResourceConfig(num_sims=4,num_vlms=3)) #local 2 gpu

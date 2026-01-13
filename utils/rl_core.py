@@ -63,7 +63,7 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
     batch['old_log_prob'] = batch['old_logprobs'].gather(2, batch['actions'].unsqueeze(-1)).squeeze(-1)
     # 3. Create Response Mask
     # 1 for valid tokens, 0 for padding
-    response_mask = torch.zeros((batch_size, max_len), dtype=torch.int, device=device)
+    response_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
     for i, length in enumerate(lengths):
         response_mask[i, :length] = 1
     batch['response_mask'] = response_mask
@@ -73,113 +73,121 @@ def collect_rollouts(
     sim_handles: list,
     vlm_handles: list,
     shard_iterator: Iterator[list[str]],
-):
+    target_episodes: int = float('inf')
+) -> list:
     """
-    Collects a batch of trajectories. 
-    The batch size is determined implicitly by the total number of episodes 
-    contained in the shards yielded by `shard_iterator`.
+    Orchestrates the RL collection pipeline.
+    Structurally identical to run_inference_driver, except VLM recycling 
+    is delayed until post-processing completes.
     """
-    
-    # --- 1. State Initialization ---
+
+    # --- 1. Initialize Pools ---
     idle_vlms = deque(vlm_handles)
-    ready_sims = deque()     # (sim_handle, reset_ref)
+    ready_sims = deque() 
+
+    # --- 2. Tracking Futures ---
+    pending_resets = {}   # reset_ref -> sim_handle
+    active_episodes = {}  # sup_ref -> "running"
     
-    # Future Tracking
-    pending_resets = {}      # {reset_ref: sim_handle}
-    active_episodes = {}     # {run_ref: "running"}
-    pending_postproc = {}    # {pp_ref: vlm_handle}
-    
-    trajectory_buffer = []   # Results
-    
-    # State flags
+    # [DIFFERENCE]: New state for VLM post-processing
+    pending_postproc = {} # pp_ref -> vlm_handle 
+
+    trajectory_buffer = []
     iterator_exhausted = False
 
-    # --- 2. Bootstrap Sims ---
-    # Assign initial work and trigger first reset
-    print("Bootstrapping simulation workers...")
-    for sim in sim_handles:
+    # --- 3. Bootstrap: Initial Sharding & Resets (IDENTICAL) ---
+    print(f"Bootstrapping: Initializing {len(sim_handles)} environments...")
+    for sim_handle in sim_handles:
         try:
-            shard = next(shard_iterator)
-            sim.assign_shard.remote(shard)
-            reset_ref = sim.reset.remote()
-            pending_resets[reset_ref] = sim
+            initial_shard = next(shard_iterator)
+            sim_handle.assign_shard.remote(initial_shard)
+            reset_ref = sim_handle.reset.remote()
+            pending_resets[reset_ref] = sim_handle   
         except StopIteration:
             iterator_exhausted = True
-            # If we run out of shards during bootstrap, this worker is useless
+            print("Warning: Not enough shards for all workers during bootstrap.")
             pass
 
-    # --- 3. The Collection Loop ---
-    # Run as long as there is active work or pending input
-    while (active_episodes or pending_resets or pending_postproc or 
-          (ready_sims and idle_vlms and not iterator_exhausted)):
+    
+    # Helper to check if we should keep the loop alive
+    def has_work():
+        # 1. Are tasks currently running?
+        is_active = len(active_episodes) > 0 or len(pending_resets) > 0 or len(pending_postproc) > 0
+        
+        # 2. Can we launch new tasks? (Resources available AND Target not met)
+        potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
+        can_launch = (len(idle_vlms) > 0 and len(ready_sims) > 0)
+        should_launch = can_launch and (potential < target_episodes) and (not iterator_exhausted)
+        
+        return is_active or should_launch
 
-        # A. Dispatcher
-        # Try to pair idle VLMs with ready Sims
-        while idle_vlms and ready_sims:
+    # --- Event Loop ---
+    while has_work():
+        
+        # A. Dispatch (IDENTICAL)
+        total_potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
+        
+        while (idle_vlms and ready_sims and total_potential < target_episodes):
             vlm = idle_vlms.popleft()
-            sim, init_ref = ready_sims.popleft()
+            sim, init_state_ref = ready_sims.popleft()
             
-            # Launch Episode
-            run_ref = vlm.run_episode.remote(sim, init_ref)
-            active_episodes[run_ref] = "running"
-        
+            sup_ref = vlm.run_episode.remote(sim, init_state_ref)
+            active_episodes[sup_ref] = "running"
+            total_potential +=1
+
+
         # B. Wait for Events
-        # We assume one of these maps has keys, otherwise the outer loop would have broken
-        watch_list = list(pending_resets.keys()) + \
-                     list(active_episodes.keys()) + \
-                     list(pending_postproc.keys())
+        all_watch_refs = list(pending_resets.keys()) + \
+                         list(active_episodes.keys()) + \
+                         list(pending_postproc.keys()) # Added check
         
-        # If nothing to watch, it means we are just waiting for the Dispatcher to find work
-        # (unlikely in this logic flow, but good for safety)
-        if not watch_list:
+        if not all_watch_refs:
             break
 
-        done_refs, _ = ray.wait(watch_list, num_returns=1)
+        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1)
         
-        for ref in done_refs:
+        for ref in ready_refs:
             
-            # --- CASE 1: Sim Reset Complete ---
+            # --- CASE 1: Reset Finished (IDENTICAL) ---
             if ref in pending_resets:
-                sim = pending_resets.pop(ref)
-                ready_sims.append((sim, ref)) # ref is the new initial_state
+                sim_handle = pending_resets.pop(ref)
+                ready_sims.append((sim_handle, ref))
             
-            # --- CASE 2: Episode Execution Complete ---
+            # --- CASE 2: Episode Finished (MODIFIED) ---
             elif ref in active_episodes:
                 del active_episodes[ref]
-                # Unpack results: VLM and Sim split paths here
-                vlm_handle, sim_handle, is_exhausted, state_dict = ray.get(ref)
                 
-                # Path A: Simulator Lifecycle
-                # Trigger reset immediately so it can start loading the next scene/episode
+                # Unpack results
+                vlm, hab, is_exhausted, state = ray.get(ref)
+                
+                # [DIFFERENCE]: VLM does NOT go to idle_vlms yet.
+                # It goes to post-processing.
+                pp_ref = vlm.postprocess_episode.remote()
+                pending_postproc[pp_ref] = vlm
+
+                # Sim Logic: [IDENTICAL to Inference]
                 try:
                     if is_exhausted:
-                        # Fetch new work if needed
                         new_shard = next(shard_iterator)
-                        sim_handle.assign_shard.remote(new_shard)
+                        hab.assign_shard.remote(new_shard)
                     
-                    # Always reset (either new shard or next ep in current shard)
-                    new_reset_ref = sim_handle.reset.remote()
-                    pending_resets[new_reset_ref] = sim_handle
-                    
+                    new_reset_ref = hab.reset.remote()
+                    pending_resets[new_reset_ref] = hab
                 except StopIteration:
+                    # No more work. Retire the Habitat worker.
                     iterator_exhausted = True
-                    # This sim is now retired for this batch
+                    ray.get(hab._flush_logs_to_disk.remote()) 
                     pass
-
-                # Path B: VLM Lifecycle
-                # Send VLM to do the heavy lifting (tokenization/tensor packing)
-                pp_ref = vlm_handle.postprocess_episode.remote()
-                pending_postproc[pp_ref] = vlm_handle
-
-            # --- CASE 3: Post-Processing Complete ---
+            
+            # --- CASE 3: Post-Processing Finished (NEW) ---
             elif ref in pending_postproc:
-                vlm_handle = pending_postproc.pop(ref)
+                vlm = pending_postproc.pop(ref)
                 
-                # Store Result
-                traj_tuple = ray.get(ref) # (trajectory, tensors, metadata)
+                # Get the packed trajectory data
+                traj_tuple = ray.get(ref)
                 trajectory_buffer.append(traj_tuple)
                 
-                # Recycle VLM
-                idle_vlms.append(vlm_handle)
-
+                # [DIFFERENCE]: NOW the VLM is recycled
+                idle_vlms.append(vlm)
+                print(f"Collected episode {len(trajectory_buffer)}")
     return trajectory_buffer

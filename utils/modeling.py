@@ -271,7 +271,7 @@ class Qwen3VLSparseTextModel(Qwen3VLTextModel):
                         deepstack_visual_embeds = [
                             v[vis_keep_mask, :] for v in deepstack_visual_embeds
                         ]
-                print(f"keeping {torch.sum(vis_keep_mask)}/{len(vis_keep_mask)}")
+                # print(f"keeping {torch.sum(vis_keep_mask)}/{len(vis_keep_mask)}")
             # 3. Apply Mask to Inputs
             # Helper to slice only if tensor is not None
             def apply_mask(t):

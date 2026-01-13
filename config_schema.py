@@ -7,6 +7,8 @@ class ResourceConfig:
     ray_address: str = "local"
     vlm_resource_tag: str = "env_a"
     sim_resource_tag: str = "env_b"
+    master_addr: str = 'localhost'
+    master_port: int = 29400 #port for accelerate/ddp
     num_vlms: int = 1
     num_sims: int = 1
     vlm_conda_env: str = "vlm_node_1016"
@@ -29,6 +31,85 @@ class VLMConfig:
     use_sparse: bool = True
     save_outputs: bool = False # only need this for RL
 
+@dataclass 
+class RLConfig:
+    use_value: bool = True
+    detach_value: bool = True
+    advantage_estimator: str = "gae"
+    policy_loss_name: str = "vanilla"
+
+    # PPO Hyperparameters
+    clip_ratio: float = 0.2
+    clip_ratio_low: Optional[float] = None
+    clip_ratio_high: Optional[float] = None
+    clip_ratio_c: float = 3.0
+    
+    # GAE Hyperparameters
+    gamma: float = 0.99
+    lam: float = 0.95
+    
+    # Value & Entropy
+    cliprange_value: float = 0.2
+    entropy_bonus: float = -0.01
+
+    # # Compatibility for verl's agg_loss
+    # @property
+    # def global_batch_info(self):
+    #     # For single-worker testing, batch size is 1
+    #     return {}# "dp_size": 1, "global_batch_size": 1
+    global_batch_info: Optional[Dict[str,Any]] = field(default_factory=lambda:{})
+    # Helper to support config.get("key", default) used in loss functions
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+@dataclass
+class SFTConfig:
+    pass
+
+# --- training configs ---
+@dataclass
+class HydraLoraConfig:
+    """
+    A Hydra-compatible mirror of peft.LoraConfig.
+    Removes Union types (like str | List[str]) that crash OmegaConf.
+    """
+    r: int = 128
+    lora_alpha: int = 256
+    lora_dropout: float = 0.05
+    bias: str = "none"
+    task_type: str = "CAUSAL_LM"
+    
+    # Enforce List[str] to satisfy Hydra. 
+    # If you need regex (str), you can change this to Any, but List is safer.
+    target_modules: List[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
+    
+    # modules_to_save is also a list, defaulting to None is fine for Hydra
+    modules_to_save: Optional[List[str]] = None
+
+@dataclass
+class VLMTrainingConfig:
+    # Optimization
+    learning_rate: float = 5e-6
+    grad_accum_steps: int = 1
+    mixed_precision: Optional[str] = "no" #['no', 'fp8', 'fp16', 'bf16']
+    gradient_checkpointing: bool = True
+    total_optimization_steps: int = 100000 # used for linear LR schedule
+
+    # Value Head Configuration
+    value_head_learning_rate: float = 5e-4  # Often higher than Adapter LR
+    value_head_dropout: float = 0.1
+    value_head_dtype: str = "float32"  
+    # List of hidden layer sizes. Empty list [] implies a single linear layer (Linear Probe).
+    value_head_hidden_dims: List[int] = field(default_factory=list)
+
+    # PEFT: Pass the actual configuration object here (e.g., LoraConfig)
+    # Typed as Any to avoid crashing if peft isn't installed on the driver
+    peft_config: Optional[Any] = field(default_factory=HydraLoraConfig) 
+
+    rl_config:Optional[RLConfig] = field(default_factory=RLConfig) # RL Algorithm 
+    sft_config:Optional[SFTConfig] = None
+
+# --- habitat sim configs ---
 @dataclass
 class HabitatConfig:
     config_path: str = "configs/objectnav_hm3d_rgbd_semantic.yaml"
@@ -47,6 +128,7 @@ class HabitatConfig:
         "fp_stop": True
     })
 
+# --- Rollouts (both for Eval and RL) ---
 @dataclass
 class RolloutConfig:
     max_steps: int = 300
@@ -67,7 +149,7 @@ class RolloutConfig:
         {"role": "assistant", "content": [{"type": "text", "text": "**forward**"}]}
     ])
 
-# --- 4. Task / Rollout Logic ---
+# --- Experiment housekeeping ---
 @dataclass
 class RunConfig:
     run_name: str = "debug_run"
@@ -78,7 +160,7 @@ class RunConfig:
     output_dir: str = "./dump/results"
     jobtype: str = "eval"
 
-# --- 5. THE MAIN ROOT CONFIG ---
+# --- ROOT CONFIGs ---
 @dataclass
 class InferenceConfig:
     resources: ResourceConfig = field(default_factory=ResourceConfig)
@@ -86,3 +168,7 @@ class InferenceConfig:
     vlm: VLMConfig = field(default_factory=VLMConfig)
     sim: HabitatConfig = field(default_factory=HabitatConfig)
     task: RunConfig = field(default_factory=RunConfig)
+
+@dataclass
+class RLConfig(InferenceConfig):
+    training: VLMTrainingConfig = field(default_factory=VLMTrainingConfig)
