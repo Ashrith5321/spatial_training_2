@@ -7,6 +7,8 @@ from utils.habitat_worker import LoggingHabitatWorker
 from utils.vlm_worker import VLMWorker,VLMTrainingMixin
 import numpy as np
 from tqdm import tqdm
+from utils.tensor_utils import TensorPacker
+
 def create_shard_iterator(
     all_episodes: List[str], 
     shard_size: int
@@ -262,14 +264,28 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
                 raise ValueError("No stored model inputs found for postprocessing.")
         logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
         self.rl_trajectory['old_logprobs'] = logprobs
-        self.rl_trajectory['values'] = values
+        self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
         return self.rl_trajectory,model_inputs    
     
 class RLRayWorker(RLWorker):
     def run_episode(self,habitat_handle,initial_state_ref):
         habitat_handle,is_exhausted,state_dict,_,_,_ = super().run_episode(habitat_handle, initial_state_ref)
         return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
+    
+    def postprocess_episode(self):
+        trajectory,model_inputs = super().postprocess_episode()
+        inputs_tensors,inputs_metadata = TensorPacker.pack(model_inputs)
+        return trajectory,inputs_tensors,inputs_metadata
 
+    def train_rl_step(self, embeds_inputs_np, embeds_inputs_meta,traj_batch):
+        embeds_inputs = TensorPacker.unpack(embeds_inputs_np,embeds_inputs_meta,device=self.accelerator.device)
+        actions = traj_batch['actions']
+        old_log_prob = traj_batch['old_log_prob']
+        advantages = traj_batch['advantages']
+        returns = traj_batch['returns']
+        old_values = traj_batch['values']
+        return super().train_rl_step(embeds_inputs, actions, old_log_prob, advantages, returns, old_values, None)
+    
 class HabitatRayWorker(LoggingHabitatWorker):
     """
     Ray Actor wrapper for the LoggingHabitatWorker.

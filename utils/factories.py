@@ -1,11 +1,11 @@
 import ray
 import os
 from omegaconf import OmegaConf
-from config_schema import InferenceConfig
+from config_schema import *
 
 # Use these imports for type hinting
 from config_schema import VLMConfig, RolloutConfig, ResourceConfig, HabitatConfig, RunConfig
-from typing import List, Dict, Any, Iterator, Optional
+from typing import List, Dict, Any, Iterator, Optional,Union
 import logging
 import json
 
@@ -29,6 +29,7 @@ class InferenceWorkerFactory:
                 **vlm_dict
             ) for _ in range(res_cfg.num_vlms)
         ]
+    
 class RLWorkerFactory:
     @staticmethod
     def create(vlm_dict: dict, rollout_dict: dict, res_cfg: ResourceConfig):
@@ -42,13 +43,28 @@ class RLWorkerFactory:
             num_gpus=res_cfg.vlm_gpu_fraction,
             runtime_env={"conda": res_cfg.vlm_conda_env}
         )
-
-        return [
+        workers =  [
             RemoteRLWorker.remote(
                 rollout_config=rollout_dict, 
                 **vlm_dict
             ) for _ in range(res_cfg.num_vlms)
         ]
+        
+        return workers
+    def _enable_training(workers,res_cfg:ResourceConfig,train_cfg:VLMTrainingConfig):
+        # Auto-detect rendezvous point for the workers
+        world_size = len(workers)        
+        futures = []
+        for rank, w in enumerate(workers):
+            futures.append(w.setup_training.remote(
+                config=train_cfg,
+                rank=rank,
+                world_size=world_size,
+                master_addr=res_cfg.master_addr,
+                master_port=res_cfg.master_port,
+            ))
+       
+        return futures
 
 class SimWorkerFactory:
     @staticmethod
@@ -99,8 +115,8 @@ class WandbFactory:
             run_config=full_dict_cfg
         )
 
-class InferenceBootstrapper:
-    def __init__(self, cfg: InferenceConfig):
+class ExpBootstrapper:
+    def __init__(self, cfg: Union[InferenceConfig,RLConfig]):
         # Resolve all interpolations (Stage 1)
         # This turns ${read_text:...} into actual file content
         self.resolved_dict = OmegaConf.to_container(cfg, resolve=True)
@@ -118,32 +134,50 @@ class InferenceBootstrapper:
             )
         else:
             ray.init(address=res.ray_address, ignore_reinit_error=True)
-
-    def bootstrap_all(self):
-        self.setup_cluster()
-        
-        # 1. Spawn Logger (Pass the FULL resolved dict for WandB hyperparams)
-        logger = WandbFactory.create(
+    def bootstrap_logger(self):
+        return WandbFactory.create(
             self.typed_cfg.task, 
             self.typed_cfg.resources, 
             self.resolved_dict
         )
-        
-        # 2. Spawn Inference Workers
-        # We pass the resolved dictionaries from our resolved_dict
-        vlms = InferenceWorkerFactory.create(
+    
+    def bootstrap_vlms_infer(self):
+        return InferenceWorkerFactory.create(
             vlm_dict=self.resolved_dict['vlm'], 
             rollout_dict=self.resolved_dict['rollout'], 
             res_cfg=self.typed_cfg.resources
         )
-        
-        # 3. Spawn Sim Workers
-        sims = SimWorkerFactory.create(
+    
+    def bootstrap_vlms_rl(self):
+        workers = RLWorkerFactory.create(
+            vlm_dict=self.resolved_dict['vlm'], 
+            rollout_dict=self.resolved_dict['rollout'], 
+            res_cfg=self.typed_cfg.resources,
+        )
+        futures = RLWorkerFactory._enable_training(workers,self.typed_cfg.resources,self.typed_cfg.training)
+        ray.get(futures)
+        return workers
+    
+    def bootstrap_sims(self,logger=None):
+        return SimWorkerFactory.create(
             sim_dict=self.resolved_dict['sim'], 
             res_cfg=self.typed_cfg.resources, 
             task_cfg=self.typed_cfg.task, 
             logger_actor=logger
         )
+    
+    def bootstrap_eval(self):
+        self.setup_cluster()
+        
+        # 1. Spawn Logger (Pass the FULL resolved dict for WandB hyperparams)
+        logger = self.bootstrap_logger()
+        
+        # 2. Spawn Inference Workers
+        # We pass the resolved dictionaries from our resolved_dict
+        vlms = self.bootstrap_vlms_infer()
+        
+        # 3. Spawn Sim Workers
+        sims = self.bootstrap_sims(logger)
         
         return vlms, sims, logger
     

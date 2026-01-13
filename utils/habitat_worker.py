@@ -636,6 +636,7 @@ class LoggingHabitatWorker(HabitatWorker):
         *args, 
         logging_output_dir: str,
         logger_actor: Any = None,
+        auto_flush = True,
         **kwargs
     ):
         from pathlib import Path
@@ -644,7 +645,7 @@ class LoggingHabitatWorker(HabitatWorker):
         # Use the new default_logging_schema provided in your prompt if none is passed
             
         super().__init__(*args, **kwargs)
-        
+        self.auto_flush = auto_flush
         self.logger_actor = logger_actor
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -723,12 +724,12 @@ class LoggingHabitatWorker(HabitatWorker):
             self.logger_actor.log_row.remote(row=payload)
 
     def reset(self, episode_id=None,output_schema=None,logging_schema=None):
-        if len(self.steps['action'])>0:
+        if len(self.steps['action'])>0 and self.auto_flush:
             self._flush_logs_to_disk()
         return super().reset(episode_id,output_schema,logging_schema)
 
     def assign_shard(self, assigned_episode_labels=None):
-        if len(self.steps['action'])>0:
+        if len(self.steps['action'])>0 and self.auto_flushs:
             self._flush_logs_to_disk()
         return super().assign_shard(assigned_episode_labels)
     

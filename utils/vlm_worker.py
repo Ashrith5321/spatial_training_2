@@ -83,6 +83,7 @@ class VLMWorker:
                 low_cpu_mem_usage=True,
                 attn_implementation = self.attn_implementation).eval()
             self.device = self.model.device
+        self.model.to('cuda')
         self.vl_model = self.model.model
         self.language_model = self.vl_model.language_model
 
@@ -321,11 +322,11 @@ class VLMWorker:
             self.reset()
         if self.using_lora() and not self.is_merged():
             self.merge_adapter() # for inference speed
-        print(f"lora merge time: {time.time()-t0}",end=" ")
+        # print(f"lora merge time: {time.time()-t0}",end=" ")
         
         t = time.time()
         turn_inputs = self.tokenize_inputs(messages,images)
-        print(f"tokenize time: {time.time()-t}",end=" ")
+        # print(f"tokenize time: {time.time()-t}",end=" ")
         # First we must crop the sequence so the turns properly lign up.
         logit_indices,prefix_starts,postfix_starts = self._get_sandwich_indices(turn_inputs['input_ids'])
         if crop_inputs:
@@ -338,7 +339,7 @@ class VLMWorker:
         
         t = time.time()
         self._accumulate_inputs(turn_inputs)
-        print(f"accumulate time: {time.time()-t}",end=" ")
+        # print(f"accumulate time: {time.time()-t}",end=" ")
         self.logit_indices.append(self.cumulative_inputs['input_ids'].shape[1]-1) #slice index for the hidden state predicting the last token in this turn.
         turn_inputs = {k: v.to(self.device) for k, v in turn_inputs.items()}
         t = time.time()
@@ -351,7 +352,7 @@ class VLMWorker:
         else:
             self.cumulative_inputs['position_ids'] = self._calculate_pos_id(pos_id_kwargs) # calculate the pos_ids for the whole sequence. hopefully not too expensive...
             turn_inputs['position_ids'] = self.cumulative_inputs['position_ids'][..., -current_len:].to(self.device)
-        print(f"pos id time: {time.time()-t}",end=" ")
+        # print(f"pos id time: {time.time()-t}",end=" ")
          # Set up inputs for this turn
         current_len = turn_inputs['input_ids'].shape[1]
         if self.use_sparse:
@@ -377,12 +378,12 @@ class VLMWorker:
              # Compute logprobs directly (1-to-1 mapping)
             relevant_logits = outputs.logits[0].float()
             all_logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
-            print(f"vlm latency: {time.time()-t}",end=" ")
+            # print(f"vlm latency: {time.time()-t}",end=" ")
 
             if self.save_outputs:
                 t = time.time()
                 self._store_outputs(outputs)
-                print(f"store outputs time: {time.time()-t}",end=" ")
+                # print(f"store outputs time: {time.time()-t}",end=" ")
             if self.use_sparse:
                 t = time.time()
                 current_keep_mask = self.language_model.seq_keep_mask
@@ -396,14 +397,14 @@ class VLMWorker:
                 else:
                     for idx, image_embeds in enumerate(self.language_model.kept_visual_embeds):
                         self.past_image_embeds[idx] = torch.cat((self.past_image_embeds[idx],image_embeds)) #handle the batching...
-                print(f"store sparse states time: {time.time()-t}",end=" ")
+                # print(f"store sparse states time: {time.time()-t}",end=" ")
         if check_probs:
             try:
                 assert(torch.argmax(all_logprobs,dim=-1).item() in self.vocab_ids)
             except:
                 print("WARNING: prediction not in provided vocab")
-        # print("inference done!")
-        print(f" total time: {time.time()-t0}")
+        # # print("inference done!")
+        # print(f" total time: {time.time()-t0}")
         if full_logprobs:
             return all_logprobs.cpu().float().numpy(),outputs
         else:
@@ -441,56 +442,7 @@ class VLMWorker:
         if self._is_lora is None:
             self._is_lora = isinstance(self.model,PeftModel)
         return self._is_lora
-    
-@dataclass 
-class RLAlgoConfig:
-    use_value: bool = True
-    advantage_estimator: str = "gae"
-    policy_loss_name: str = "vanilla"
 
-    # PPO Hyperparameters
-    clip_ratio: float = 0.2
-    clip_ratio_low: Optional[float] = None
-    clip_ratio_high: Optional[float] = None
-    clip_ratio_c: float = 3.0
-    
-    # GAE Hyperparameters
-    gamma: float = 0.99
-    lam: float = 0.95
-    
-    # Value & Entropy
-    cliprange_value: float = 0.2
-    entropy_bonus: float = 0.01
-
-    # Compatibility for verl's agg_loss
-    @property
-    def global_batch_info(self):
-        # For single-worker testing, batch size is 1
-        return {}# "dp_size": 1, "global_batch_size": 1
-
-    # Helper to support config.get("key", default) used in loss functions
-    def get(self, key, default=None):
-        return getattr(self, key, default)
-
-@dataclass
-class VLMTrainingConfig:
-    # Optimization
-    learning_rate: float = 5e-6
-    grad_accum_steps: int = 1
-    mixed_precision: str = "fp16"
-    gradient_checkpointing: bool = True
-
-    # Value Head Configuration
-    value_head_learning_rate: float = 5e-4  # Often higher than Adapter LR
-    value_head_dropout: float = 0.1
-    value_head_dtype: str = "float32"  # float32 or float16
-    # List of hidden layer sizes. Empty list [] implies a single linear layer (Linear Probe).
-    value_head_hidden_dims: List[int] = field(default_factory=list)
-    # PEFT: Pass the actual configuration object here (e.g., LoraConfig)
-    # Typed as Any to avoid crashing if peft isn't installed on the driver
-    peft_config: Optional[Any] = None
-
-    rl_algo_config:Optional[RLAlgoConfig] = RLAlgoConfig()
 # Handle optional PEFT imports gracefully
 try:
     from peft import get_peft_model, prepare_model_for_kbit_training, PeftModel
@@ -533,7 +485,7 @@ class VLMWrapper(nn.Module):
         self.vlm = vlm # Can be PeftModel
         self._freeze_vision_tower()
 
-    def _forward_embeds(self,embeds_inputs,compute_values=False):
+    def _forward_embeds(self,embeds_inputs,compute_values=False,detach_value=True):
         embeds_inputs = {k:v.to('cuda') for k,v in embeds_inputs.items()}
         embeds_inputs['inputs_embeds'] = embeds_inputs['inputs_embeds'].to(self.vlm.dtype)
         embeds_inputs['deepstack_visual_embeds'] = [v.to(self.vlm.dtype) for v in embeds_inputs['deepstack_visual_embeds']]
@@ -543,7 +495,10 @@ class VLMWrapper(nn.Module):
         hidden = self.vlm.language_model(**embeds_inputs).last_hidden_state
         values = None
         if compute_values:
-            values = self.vlm.value_head(hidden[:,logits_to_keep].to(self.vlm.value_head.dtype)).squeeze(-1)
+            value_hidden = hidden[:,logits_to_keep].to(self.vlm.value_head.dtype)
+            if detach_value:
+                value_hidden = value_hidden.detach() #prevent gradient pollution
+            values = self.vlm.value_head(value_hidden).squeeze(-1)
         logits = self.vlm.lm_head(hidden[:,logits_to_keep])
         return logits,values
 
@@ -609,6 +564,7 @@ class VLMWrapper(nn.Module):
             # Fallback info if architecture is exotic
             print("[VLMWrapper] Info: Could not auto-detect Vision Tower module to safeguard. Assuming it is correctly frozen.")
 class VLMTrainingMixin:
+    from config_schema import VLMTrainingConfig
     def setup_training(self, config: VLMTrainingConfig, rank: int,
     world_size: int,
     master_addr: str,
@@ -617,7 +573,7 @@ class VLMTrainingMixin:
         Sets up distributed training using the provided TrainConfig.
         """
         from accelerate import DistributedDataParallelKwargs
-
+        from transformers import get_scheduler
         kwargs = DistributedDataParallelKwargs(find_unused_parameters=False) #prevent value head from being killed
         # 1. Manual Environment Injection for Ray
         os.environ["MASTER_ADDR"] = master_addr
@@ -626,14 +582,15 @@ class VLMTrainingMixin:
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["LOCAL_RANK"] = "0"
         
-        self.rl_algo_config=config.rl_algo_config
+        self.rl_algo_config=config.rl_config
         # 2. Initialize Accelerator
+        print("creating accelerator")
         self.accelerator = Accelerator(
             gradient_accumulation_steps=config.grad_accum_steps,
             mixed_precision=config.mixed_precision,
             kwargs_handlers=[kwargs]
         )
-
+        print("accelerator created")
         # 3. Gradient Checkpointing (Must run before PEFT wrapping)
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable({"use_reentrant": False})
@@ -645,8 +602,8 @@ class VLMTrainingMixin:
                 raise NotImplementedError("Model does not support 'enable_input_require_grads' method.")
         hidden_size = self.model.language_model.config.hidden_size
         
-        if config.rl_algo_config is not None:
-            if config.rl_algo_config.use_value:
+        if config.rl_config is not None:
+            if config.rl_config.use_value:
                 self.model.value_head = ValueHead(
                     input_dim=hidden_size,
                     hidden_dims=config.value_head_hidden_dims,
@@ -654,11 +611,13 @@ class VLMTrainingMixin:
                     dtype=getattr(torch,config.value_head_dtype)
                 ).to(self.model.device)
             from verl.trainer.ppo.core_algos import get_policy_loss_fn
-            self.policy_loss_fn = get_policy_loss_fn(config.rl_algo_config.policy_loss_name)
+            self.policy_loss_fn = get_policy_loss_fn(config.rl_config.policy_loss_name)
         # 4. Apply PEFT (if config provided)
         if config.peft_config is not None:
             if not PEFT_AVAILABLE:
                 raise ImportError("TrainConfig has peft_config, but 'peft' library is not installed.")
+            from peft import LoraConfig
+            from dataclasses import asdict
             # Direct application of the config object
             # CRITICAL: Add 'value_head' to modules_to_save so PEFT treats it as 
             # a full-rank trainable module (not an adapter) and saves it in the checkpoint.
@@ -667,13 +626,19 @@ class VLMTrainingMixin:
             if "value_head" not in config.peft_config.modules_to_save:
                 print("saving value head")
                 config.peft_config.modules_to_save.append("value_head")
-            self.model = get_peft_model(self.model, config.peft_config)
+            try:
+                peft_kwargs = asdict(config.peft_config)
+            except:
+                peft_kwargs = config.peft_config
+
+            real_peft_config = LoraConfig(**peft_kwargs)
+            self.model = get_peft_model(self.model, real_peft_config)
             # Print trainable parameters to verify LoRA is active
             if self.accelerator.is_local_main_process:
                 self.model.print_trainable_parameters()
         # 5. Create Optimizer
         # Only optimize parameters that require gradients (i.e., the Adapters)
-
+        print(f"accelerator device: {self.accelerator.device}")
         wrapper = VLMWrapper(self.model)
         head_params = [p for n, p in wrapper.named_parameters() if "value_head" in n and p.requires_grad]
         rest_params = [p for n, p in wrapper.named_parameters() if "value_head" not in n and p.requires_grad]
@@ -691,12 +656,18 @@ class VLMTrainingMixin:
             }
         ]
         optimizer = AdamW(optimizer_grouped_parameters)
-
+        scheduler = get_scheduler(
+            name="linear",
+            optimizer=optimizer,
+            num_warmup_steps=10, # Short warmup usually sufficient for RL
+            num_training_steps=config.total_optimization_steps
+        )
         # 6. Prepare with Accelerator
         # self.ddp_model becomes the sync-wrapper
         # self.model remains the direct reference (now with LoRA layers attached)
-        self.ddp_model, self.optimizer = self.accelerator.prepare(
-            wrapper, optimizer
+
+        self.ddp_model, self.optimizer,self.scheduler = self.accelerator.prepare(
+            wrapper, optimizer,scheduler
         )            
         
     def train_sft_step(self, batch):
@@ -757,13 +728,14 @@ class VLMTrainingMixin:
         self.ddp_model.train()
         if self.is_merged():
             self.unmerge_adapter()
+            self.reset() #clear internal state, training is (mostly) stateless
         self.accelerator.wait_for_everyone() # ensure all workers have unmerged before training
         # Accumulate gradients (handle micro-batches)
         with self.accelerator.accumulate(self.ddp_model):
             # Forward via DDP wrapper (triggers sync)
-            logits,vpreds = self.ddp_model(embeds_inputs = embeds_inputs,compute_values = self.rl_algo_config.use_value)
+            logits,vpreds = self.ddp_model(embeds_inputs = embeds_inputs,compute_values = self.rl_algo_config.use_value,detach_value=self.rl_algo_config.detach_value)
             log_probs = self._calculate_action_logprobs(logits) # B by S by N_action space
-            log_prob = torch.gather(log_probs, -1, actions.unsqueeze(-1)).squeeze(-1)
+            log_prob = torch.gather(log_probs, -1, actions.unsqueeze(-1).to(log_probs.device)).squeeze(-1)
             
             '''
             old_log_prob (torch.Tensor):
@@ -780,15 +752,16 @@ class VLMTrainingMixin:
             '''
             
             response_mask = torch.ones_like(log_prob).bool() #TODO: rollout correction, rejection sampling to exclude bad tokens
-            pg_loss,metrics = self.policy_loss_fn(old_log_prob=old_log_prob,log_prob=log_prob,advantages=advantages,response_mask=response_mask,config = self.rl_algo_config)
+            pg_loss,metrics = self.policy_loss_fn(old_log_prob=old_log_prob.to(log_prob.device),log_prob=log_prob,advantages=advantages.to(log_prob.device),response_mask=response_mask,config = self.rl_algo_config)
             metrics['loss/pg_loss'] = pg_loss.detach().item()
+            metrics['return'] = torch.amax(returns).detach().item()
             if self.rl_algo_config.use_value:
-                value_loss,vf_clipfrac = compute_value_loss(vpreds,returns,old_values,response_mask,self.rl_algo_config.cliprange_value)
+                value_loss,vf_clipfrac = compute_value_loss(vpreds,returns.to(log_prob.device),old_values.to(log_prob.device),response_mask,self.rl_algo_config.cliprange_value)
                 loss = pg_loss + value_loss
-                metrics['critic/vf_clipfrac'] = vf_clipfrac
-                metrics['loss/vf_loss'] = value_loss.detach().item()
-                valid_values = torch.masked_select(vpreds, response_mask)
-                valid_returns = torch.masked_select(returns,response_mask)
+                metrics['critic/vf_clipfrac'] = vf_clipfrac.detach().item()
+                metrics['train/vf_loss'] = value_loss.detach().item()
+                valid_values = torch.masked_select(vpreds, response_mask).cpu()
+                valid_returns = torch.masked_select(returns,response_mask.cpu())
                 return_diff_var = torch.var(valid_returns - valid_values)
                 return_var = torch.var(valid_returns)
                 metrics['critic/explained_variance']=(1.0 - return_diff_var / (return_var + 1e-5)).detach().item()
@@ -797,15 +770,25 @@ class VLMTrainingMixin:
 
             if self.rl_algo_config.entropy_bonus is not None:
                 entropy_loss = compute_entropy_loss(logits,response_mask)*self.rl_algo_config.entropy_bonus
-                metrics['loss/entropy_loss'] = entropy_loss.detach().item()
-                loss =loss+entropy_loss
+                metrics['train/entropy_loss'] = entropy_loss.detach().item()
+                loss = loss+entropy_loss
                 
             # Backward (handles mixed precision scaling)
             self.accelerator.backward(loss)
+            # Clip gradients and return the total norm (Global L2)
+            # max_grad_norm is usually 0.5 or 1.0 in PPO papers
+            grad_norm = self.accelerator.clip_grad_norm_(
+                self.ddp_model.parameters(), 
+                max_norm=1.0 # Add this to your RLAlgoConfig
+            )
+            # Log the norm (Detect explosions if this spikes > 10.0)
+            metrics['train/grad_norm'] = grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm
             
             self.optimizer.step()
+            self.scheduler.step()
+            metrics['train/lr'] = self.scheduler.get_last_lr()[0]
             self.optimizer.zero_grad()
-        return metrics
+        return metrics    
     
     def save_adapter(self, path):
         """
