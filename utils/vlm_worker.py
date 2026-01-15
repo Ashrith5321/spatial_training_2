@@ -12,6 +12,27 @@ from accelerate import Accelerator
 from torch.optim import AdamW
 from dataclasses import dataclass,field
 # from transformers.models.qwen3_vl.modeling_qwen3_vl import rotate_half
+import torch.nn.functional as F
+
+def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> torch.Tensor:
+    """
+    Computes the token-level KL divergence: KL(pi || ref) = sum(pi * (log_pi - log_ref))
+    
+    Args:
+        log_probs: [Batch, Seq, Vocab] (Normalized, i.e., LogSoftmax applied)
+        ref_log_probs: [Batch, Seq, Vocab] (Normalized, i.e., LogSoftmax applied)
+    
+    Returns:
+        kl_penalty: [Batch, Seq] (Scalar KL value per token)
+    """
+    # 1. Convert log_probs to probs for the weighting term
+    probs = log_probs.exp()
+    
+    # 2. Compute KL: P * (log_P - log_Q)
+    #    We sum over the last dimension (Vocab/Action Space)
+    kl = (probs * (log_probs - ref_log_probs)).sum(dim=-1)
+    
+    return kl
 
 class VLMWorker:
     def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_impl='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],save_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,save_pixels=False):
@@ -433,6 +454,7 @@ class VLMWorker:
         self.model.merge_adapter()
         
     def unmerge_adapter(self):
+        print("Unmerging LoRA for training")
         self._is_merged = False
         self.model.unmerge_adapter()
         
@@ -717,7 +739,7 @@ class VLMTrainingMixin:
         output = self.model(**seq_inputs)
         return output.logits
 
-    def train_rl_step(self,embeds_inputs,actions,old_log_prob,advantages,returns=None,old_values=None,rollout_log_probs=None):
+    def train_rl_step(self,embeds_inputs,actions,old_log_prob,advantages,returns=None,old_values=None,rollout_log_prob=None,ref_log_probs=None):
         '''
         Docstring for train_rl_step
         
@@ -725,7 +747,8 @@ class VLMTrainingMixin:
         :param old_log_prob: B by S 
         :param advantages: B by S advantages
         :param returns: targets for value head, B by S
-        :param rollout_log_probs: Optional for rollout correction (not yet implemented)
+        :param rollout_log_prob: Optional for rollout correction (not yet implemented)
+        :param ref_logprobs: B by S by Action Space
         '''
         from verl.trainer.ppo.core_algos import compute_value_loss,compute_entropy_loss
 
@@ -778,7 +801,12 @@ class VLMTrainingMixin:
                 entropy_loss = -compute_entropy_loss(logits,response_mask)*self.rl_algo_config.entropy_bonus
                 metrics['train/entropy_loss'] = entropy_loss.detach().item()
                 loss = loss+entropy_loss
-                
+
+            if ref_log_probs is not None and self.rl_algo_config.kl_coeff is not None:
+                kld = compute_full_kl_penalty(log_probs,ref_log_probs.to(log_probs.device))
+                metrics['train/ref_kl_divergence'] = kld.mean().item()
+                loss = loss + (kld * self.rl_algo_config.kl_coeff).mean()
+
             # Backward (handles mixed precision scaling)
             self.accelerator.backward(loss)
             # Clip gradients and return the total norm (Global L2)
@@ -807,10 +835,20 @@ class VLMTrainingMixin:
         if self.accelerator.is_main_process:
             # We unwrap to get the PeftModel, then call save_pretrained
             # which knows to only save the 'adapter_model.bin'
-            unwrapped = self.accelerator.unwrap_model(self.ddp_model)
-            unwrapped.vlm.save_pretrained(path)
+            # unwrapped = self.accelerator.unwrap_model(self.ddp_model)
+            # unwrapped.vlm.save_pretrained(path)
+            self.model.save_pretrained(path)
             print(f"Adapters saved to {path}")
-
+    def save_adapter_unsafe(self, path):
+        """
+        Saves ONLY the LoRA adapters. 
+        Safe to call from Ray actor (handles rank check internally).
+        """
+        # Wait for all workers to finish their current step
+        self.accelerator.wait_for_everyone()
+        
+        self.model.save_pretrained(path)
+        print(f"Adapters saved to {path}")
 class DataGenerator:
     """Generates synthetic turn data."""
     def __init__(self, width=640, height=480, processor=None):

@@ -27,7 +27,7 @@ register_configs()
 with initialize(version_base=None, config_path="conf"):
     # Here you can list overrides just like you would on the CLI
     cfg = compose(config_name="rl_config", overrides=[
-        "task.run_name=test_rl_reinforce_plus_plus",
+        "task.run_name=anti_collision_kld",
         "task.wandb_project=rl_dev",
         "rollout.max_steps=200",
         "vlm.save_outputs=True", # need this for RL
@@ -38,8 +38,13 @@ with initialize(version_base=None, config_path="conf"):
         "resources.num_sims=4",
         "resources.master_port=25653",
         f"training.rl_config.advantage_estimator={AdvantageEstimator.REINFORCE_PLUS_PLUS}",
+        "training.grad_accum_steps=4",
+        "training.rl_config.gamma=0.6",
+        "training.learning_rate=1e-5",
+        "sim.fp_guard=false"
         # "training.rl_config.policy_loss_name="
     ])
+
 advantage_estimator_fn = get_adv_estimator_fn(cfg.training.rl_config.advantage_estimator)
 
 print(f"Model ID: {cfg.vlm.model_id}")
@@ -49,20 +54,27 @@ logger = get_console_logger()
 bootstrapper.setup_cluster()
 trainers = bootstrapper.bootstrap_vlms_rl() #allocate vlms first to prevent out of room issues
 wandb_actor = bootstrapper.bootstrap_logger()
-sims = bootstrapper.bootstrap_sims(wandb_actor)
+sim_logger = None
+sims = bootstrapper.bootstrap_sims(sim_logger)
 shard_futures = [sim.assign_shard.remote(None) for sim in sims]
 ray.get(shard_futures)
 
 #
-# 3. Prepare Data Shards (using simple helper)
-shard_iter = get_shard_iterator(
-    subset_label= cfg.task.subset_label,
-    episode_json= cfg.task.episode_json,
-    shard_size=cfg.task.shard_size,
-    logger=logger
-)
+# # 3. Prepare Data Shards (using simple helper)
+# shard_iter = get_shard_iterator(
+#     subset_label= cfg.task.subset_label,
+#     episode_json= cfg.task.episode_json,
+#     shard_size=cfg.task.shard_size,
+#     logger=logger
+# )
 try:
     for i in range(100):
+        shard_iter = get_shard_iterator(
+            subset_label= cfg.task.subset_label,
+            episode_json= cfg.task.episode_json,
+            shard_size=cfg.task.shard_size,
+            logger=logger
+        )
         # ------------------------------------------- rollouts ------------------------------------------
         logger.info("Starting rollout collection!")
 
@@ -106,9 +118,9 @@ try:
 
         # ------------------------------ dispatch training ----------------------------
         logger.info("Starting training")
-
+        future_metadata = {}
         training_futures = []
-
+        perm_indices = np.random.permutation(len(trajectory_list)) # shuffle
         for batch_start in range(0, len(trajectory_list), num_vlms):
             
             # Create futures for this specific "global step"
@@ -117,15 +129,15 @@ try:
             
             for worker_idx, trainer in enumerate(trainers):
                 global_idx = batch_start + worker_idx
-                
+                global_idx = perm_indices[global_idx]
                 # Access the specific inputs and the sliced TensorDict for this index
                 # We use global_idx to ensure we pull the correct corresponding data
-                step_futures.append(
-                    trainer.train_rl_step.remote(
+                ref = trainer.train_rl_step.remote(
                         *model_inputs[global_idx], 
                         traj_batch[global_idx : global_idx + 1, traj_batch['response_mask'][global_idx].bool()]
                     )
-                )
+                step_futures.append(ref)
+                future_metadata[ref] = global_idx
                 
             training_futures.extend(step_futures)
 
@@ -144,6 +156,21 @@ try:
                 # We catch exceptions here to prevent one failed batch from crashing the loop
                 try:
                     result = ray.get(ref)
+                    rollout_idx = future_metadata[ref]
+
+                    batch_row = traj_batch[rollout_idx] 
+                    valid_mask = batch_row['response_mask'].bool()
+                    traj_stats = batch_row[valid_mask] 
+                    # 4. Log
+                    rollout_stats = {
+                        "rollout/ep_rew": traj_stats['rewards'].sum().item(),
+                        "rollout/ep_len": valid_mask.sum().item(),
+                        # .max() is safe if success is 00001 (sparse) or 11111 (broadcasted)
+                        "rollout/success": traj_stats['success'].max().item(), 
+                        "rollout/spl": traj_stats['spl'].max().item(),
+                        "rollout/ep_rtn": traj_stats['returns'].mean().item(),
+                    }
+                    result |= rollout_stats
                     wandb_actor.log.remote(result)
                     completed_count += 1
                     

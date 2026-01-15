@@ -1,4 +1,5 @@
 import torch
+
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 from tensordict import TensorDict
@@ -43,7 +44,7 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
         tensors = []
         for arr in arrays:
             t = torch.tensor(arr, device=device)
-            if key in ['rewards', 'values', 'old_logprobs', 'logprobs']:
+            if key in ['rewards', 'values', 'old_logprobs', 'logprobs', 'ref_logprobs']:
                 t = t.float() # Ensure float32
             elif key in ['actions']:
                 t = t.int()  # Ensure int32 for pointer
@@ -68,6 +69,28 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
         response_mask[i, :length] = 1
     batch['response_mask'] = response_mask
     return TensorDict(batch,batch_size=batch['old_log_prob'].shape[:2])
+
+import torch.nn.functional as F
+
+def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> torch.Tensor:
+    """
+    Computes the token-level KL divergence: KL(pi || ref) = sum(pi * (log_pi - log_ref))
+    
+    Args:
+        log_probs: [Batch, Seq, Vocab] (Normalized, i.e., LogSoftmax applied)
+        ref_log_probs: [Batch, Seq, Vocab] (Normalized, i.e., LogSoftmax applied)
+    
+    Returns:
+        kl_penalty: [Batch, Seq] (Scalar KL value per token)
+    """
+    # 1. Convert log_probs to probs for the weighting term
+    probs = log_probs.exp()
+    
+    # 2. Compute KL: P * (log_P - log_Q)
+    #    We sum over the last dimension (Vocab/Action Space)
+    kl = (probs * (log_probs - ref_log_probs)).sum(dim=-1)
+    
+    return kl
 
 def collect_rollouts(
     sim_handles: list,

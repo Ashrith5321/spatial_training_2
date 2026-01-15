@@ -410,7 +410,9 @@ class HabitatWorker:
         if self.postprocess:
             step_dict = self._postprocess_step(step_dict)
             extras['stuck'] = np.linalg.norm(np.array(self.last_step['info']['pos_rots'])-np.array(step_dict['info']['pos_rots']))<1e-5 # record collisions
-
+            if extras['stuck']:
+                print("applying collision penalty")
+                step_dict['reward']-=1
         if self.enable_caching:
             extras["timestamp"] = time.time()
             if supplementary_logs is None:

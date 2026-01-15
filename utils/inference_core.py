@@ -161,7 +161,9 @@ class EpisodeRolloutMixin:
                         "rollout_logprobs": action_logprobs,
                         "rollout_probs": action_probs,
                         "rewards": state_dict.get("reward", 0.0),
-                        "dones": state_dict['done']
+                        "dones": state_dict['done'],
+                        "spl": state_dict['info']['spl'],
+                        "success": state_dict['info']['success']
                     }
                     if compute_value:
                         import torch
@@ -258,13 +260,24 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
                 logits,values = self._forward_embeds(self.rl_embeds_inputs,None,self.rl_algo_config.use_value)
                 model_inputs = self.rl_embeds_inputs
             elif self.rl_seq_inputs is not None:
-                logits,values = self._forward_seq(self.rl_seq_inputs,None,self.config.rl_algo_config.use_value)
+                logits,values = self._forward_seq(self.rl_seq_inputs,None,self.rl_algo_config.use_value)
                 model_inputs = self.rl_seq_inputs
             else:
                 raise ValueError("No stored model inputs found for postprocessing.")
-        logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
-        self.rl_trajectory['old_logprobs'] = logprobs
-        self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
+            logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
+            self.rl_trajectory['old_logprobs'] = logprobs
+            self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
+
+        if self.rl_algo_config.use_ref:
+            with torch.no_grad():
+                with self.model.disable_adapter():
+                    if self.rl_embeds_inputs is not None:
+                        logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
+                    elif self.rl_seq_inputs is not None:
+                        logits,values = self._forward_seq(self.rl_seq_inputs,None,False)
+                    ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
+                    self.rl_trajectory['ref_logprobs'] = ref_logprobs
+
         return self.rl_trajectory,model_inputs    
     
 class RLRayWorker(RLWorker):
@@ -284,7 +297,10 @@ class RLRayWorker(RLWorker):
         advantages = traj_batch['advantages']
         returns = traj_batch['returns']
         old_values = traj_batch['values']
-        return super().train_rl_step(embeds_inputs, actions, old_log_prob, advantages, returns, old_values, None)
+        ref_logprobs = None
+        if 'ref_logprobs' in traj_batch.keys():
+            ref_logprobs = traj_batch['ref_logprobs']
+        return super().train_rl_step(embeds_inputs, actions, old_log_prob, advantages, returns, old_values, None,ref_logprobs)
     
 class HabitatRayWorker(LoggingHabitatWorker):
     """
