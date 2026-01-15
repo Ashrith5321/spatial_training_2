@@ -37,7 +37,8 @@ with initialize(version_base=None, config_path="conf"):
         "resources.num_vlms=2",
         "resources.num_sims=3",
         "resources.master_port=25653",
-        f"training.rl_config.advantage_estimator={AdvantageEstimator.REINFORCE_PLUS_PLUS}",
+        # f"training.rl_config.advantage_estimator={AdvantageEstimator.REINFORCE_PLUS_PLUS}",
+        f"training.rl_config.advantage_estimator=reinforce_plus_plus_linear_time_aware",
         "training.grad_accum_steps=3",
         "training.rl_config.gamma=0.9",
         "training.learning_rate=1e-5",
@@ -57,8 +58,8 @@ trainers = bootstrapper.bootstrap_vlms_rl() #allocate vlms first to prevent out 
 wandb_actor = bootstrapper.bootstrap_logger()
 sim_logger = None
 sims = bootstrapper.bootstrap_sims(sim_logger)
-shard_futures = [sim.assign_shard.remote(None) for sim in sims]
-ray.get(shard_futures)
+# shard_futures = [sim.assign_shard.remote(None) for sim in sims]
+# ray.get(shard_futures)
 
 #
 # # 3. Prepare Data Shards (using simple helper)
@@ -70,8 +71,8 @@ shard_iter = get_shard_iterator(
 )
 trajectory_list = []
 ROLLOUT_SIZE = 12
-N_EPOCH = 3
-EST_BUFF_SIZE = 128
+N_EPOCH = 2
+EST_BUFF_SIZE = 256
 
 N_EPISODES = 2000
 FREEZE_DATA = False # no longer debugging
@@ -138,7 +139,6 @@ try:
                             traj_batch[global_idx : global_idx + 1, traj_batch['response_mask'][global_idx].bool()]
                         )
                     step_futures.append(ref)
-                    future_metadata[ref] = global_idx
                 training_futures.extend(step_futures)
             ray.get(training_futures)
         # ------------------------------ dispatch logged training ----------------------------

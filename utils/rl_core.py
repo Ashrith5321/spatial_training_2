@@ -4,8 +4,12 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 from tensordict import TensorDict
 from collections import deque
-from typing import Iterator
+from typing import Iterator,Optional
 import ray
+import verl.utils.torch_functional as verl_F
+from verl.trainer.config import AlgoConfig
+from verl.trainer.ppo.core_algos import register_adv_est
+
 def collate_trajectories(trajectory_list: list[dict], device='cpu'):
     """
     Collates a list of trajectory dictionaries (numpy arrays) into a batched Tensor dictionary.
@@ -70,27 +74,7 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
     batch['response_mask'] = response_mask
     return TensorDict(batch,batch_size=batch['old_log_prob'].shape[:2])
 
-import torch.nn.functional as F
 
-def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> torch.Tensor:
-    """
-    Computes the token-level KL divergence: KL(pi || ref) = sum(pi * (log_pi - log_ref))
-    
-    Args:
-        log_probs: [Batch, Seq, Vocab] (Normalized, i.e., LogSoftmax applied)
-        ref_log_probs: [Batch, Seq, Vocab] (Normalized, i.e., LogSoftmax applied)
-    
-    Returns:
-        kl_penalty: [Batch, Seq] (Scalar KL value per token)
-    """
-    # 1. Convert log_probs to probs for the weighting term
-    probs = log_probs.exp()
-    
-    # 2. Compute KL: P * (log_P - log_Q)
-    #    We sum over the last dimension (Vocab/Action Space)
-    kl = (probs * (log_probs - ref_log_probs)).sum(dim=-1)
-    
-    return kl
 
 def collect_rollouts(
     sim_handles: list,
@@ -119,17 +103,18 @@ def collect_rollouts(
     iterator_exhausted = False
 
     # --- 3. Bootstrap: Initial Sharding & Resets (IDENTICAL) ---
-    print(f"Bootstrapping: Initializing {len(sim_handles)} environments...")
     for sim_handle in sim_handles:
         try:
-            initial_shard = next(shard_iterator)
-            sim_handle.assign_shard.remote(initial_shard)
+            if ray.get(sim_handle.is_exhausted.remote()):
+                initial_shard = next(shard_iterator)
+                sim_handle.assign_shard.remote(initial_shard)
             reset_ref = sim_handle.reset.remote()
             pending_resets[reset_ref] = sim_handle   
         except StopIteration:
             iterator_exhausted = True
             print("Warning: Not enough shards for all workers during bootstrap.")
             pass
+    print(f"Bootstrapping: Initializing {len(sim_handles)} environments...")
 
     
     # Helper to check if we should keep the loop alive
@@ -214,3 +199,86 @@ def collect_rollouts(
                 idle_vlms.append(vlm)
                 print(f"Collected episode {len(trajectory_buffer)}")
     return trajectory_buffer
+
+@register_adv_est("reinforce_plus_plus_linear_time_aware")
+def compute_reinforce_plus_plus_linear_time_aware_advantage(
+    token_level_rewards: torch.Tensor, 
+    response_mask: torch.Tensor, 
+    config: Optional[AlgoConfig] = None, 
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute REINFORCE++ advantages using a Linear Time-Decay Baseline.
+    
+    Logic:
+    1. Calculate discounted returns G_t for all steps.
+    2. Fit a global linear trend line V(t) = m*t + c to the (t, G_t) pairs.
+       This captures the natural decay of potential return as the episode progresses.
+    3. Advantage is the residual: A_t = G_t - V(t).
+    
+    This fixes the bias where early steps (high G_t) inherently overshadow late steps (low G_t).
+    """
+    assert config is not None
+    gamma = config.gamma
+    device = token_level_rewards.device
+    dtype = token_level_rewards.dtype
+    
+    # 1. Compute Standard Discounted Returns (G_t)
+    #    Same logic as the standard outcome_advantage function
+    with torch.no_grad():
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+
+        # Iterate backwards
+        for t in reversed(range(token_level_rewards.shape[1])):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            # Standard masking: reset return if the current token is masked (padding/EOS)
+            running_return = running_return * response_mask[:, t]
+
+        # 2. Prepare Data for Linear Regression
+        #    We want to fit: G_t ~ m * t + c
+        bs, seq_len = returns.shape
+        
+        # Create a time index grid: [[0, 1, 2...], [0, 1, 2...]]
+        time_indices = torch.arange(seq_len, device=device, dtype=dtype).unsqueeze(0).expand(bs, seq_len)
+
+        # Flatten and Mask: Only fit the line to VALID tokens
+        valid_mask = response_mask.bool()
+        x_flat = time_indices[valid_mask]  # Shape: [N_total_tokens]
+        y_flat = returns[valid_mask]       # Shape: [N_total_tokens]
+        
+        N = x_flat.numel()
+        
+        if N > 1:
+            # 3. Closed-Form Linear Least Squares
+            #    Formula: m = (N*Σxy - ΣxΣy) / (N*Σx² - (Σx)²)
+            #             c = (Σy - m*Σx) / N
+            sum_x = x_flat.sum()
+            sum_y = y_flat.sum()
+            sum_xy = (x_flat * y_flat).sum()
+            sum_xx = (x_flat * x_flat).sum()
+
+            denominator = N * sum_xx - sum_x * sum_x + 1e-8
+            m = (N * sum_xy - sum_x * sum_y) / denominator
+            c = (sum_y - m * sum_x) / N
+
+            # 4. Compute Baseline and Residuals
+            #    Apply the trend line back to the full tensor shape
+            baseline = m * time_indices + c
+            
+            # The Advantage is the "Surprise" (Residual)
+            # A positive advantage means you have more return than the average agent does at this specific timestamp.
+            advantages = returns - baseline
+        else:
+            # Fallback for empty batch or single token
+            advantages = returns
+
+        # 5. Whiten the Residuals
+        #    We normalize the residuals so the optimizer sees unit variance
+        advantages = verl_F.masked_whiten(advantages, response_mask)
+        
+        # Re-apply mask to ensure padding tokens are strictly 0
+        advantages = advantages * response_mask
+
+    return advantages, returns

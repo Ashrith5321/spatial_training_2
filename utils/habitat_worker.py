@@ -325,7 +325,8 @@ class HabitatWorker:
             self.assign_shard(assigned_episode_labels)
         else:
             print("skipping sim initialization since no shards provided, please call assign_shard")
-
+            self.episode_counter = 0
+            self.shard_length = 0
     def assign_shard(self,assigned_episode_labels = None):
         from habitat.core.dataset import EpisodeIterator
         from habitat.gym import make_gym_from_config
