@@ -34,7 +34,7 @@ class VLMConfig:
 @dataclass 
 class RLConfig:
     use_value: bool = True
-    detach_value: bool = True
+    value_grad_scale: float = 0.1
     advantage_estimator: str = "gae"
     policy_loss_name: str = "vanilla"
 
@@ -51,6 +51,11 @@ class RLConfig:
     # Value & Entropy
     cliprange_value: float = 0.2
     entropy_bonus: float = 0.0
+
+    # Ref KL Control
+    use_ref: bool = True
+    kl_coeff: float = 0.001
+    kl_target: float = 0.1
 
     # # Compatibility for verl's agg_loss
     # @property
@@ -75,7 +80,7 @@ class HydraLoraConfig:
     """
     r: int = 128
     lora_alpha: int = 256
-    lora_dropout: float = 0.01
+    lora_dropout: float = 0.0
     bias: str = "none"
     task_type: str = "CAUSAL_LM"
     
@@ -97,7 +102,7 @@ class VLMTrainingConfig:
 
     # Value Head Configuration
     value_head_learning_rate: float = 5e-4  # Often higher than Adapter LR
-    value_head_dropout: float = 0.01
+    value_head_dropout: float = 0.0
     value_head_dtype: str = "float32"  
     # List of hidden layer sizes. Empty list [] implies a single linear layer (Linear Probe).
     value_head_hidden_dims: List[int] = field(default_factory=lambda:[1024,512])
