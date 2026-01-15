@@ -266,10 +266,12 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
                 raise ValueError("No stored model inputs found for postprocessing.")
             logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
             self.rl_trajectory['old_logprobs'] = logprobs
-            self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
+            if values is not None:
+                self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
 
         if self.rl_algo_config.use_ref:
             with torch.no_grad():
+                self.unmerge_adapter()
                 with self.model.disable_adapter():
                     if self.rl_embeds_inputs is not None:
                         logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
@@ -296,11 +298,11 @@ class RLRayWorker(RLWorker):
         old_log_prob = traj_batch['old_log_prob']
         advantages = traj_batch['advantages']
         returns = traj_batch['returns']
-        old_values = traj_batch['values']
-        ref_logprobs = None
-        if 'ref_logprobs' in traj_batch.keys():
-            ref_logprobs = traj_batch['ref_logprobs']
-        return super().train_rl_step(embeds_inputs, actions, old_log_prob, advantages, returns, old_values, None,ref_logprobs)
+        old_values = traj_batch.get('values',None)
+        rollout_log_probs = traj_batch.get('rollout_logprobs',None)
+        ref_logprobs = traj_batch.get('ref_logprobs',None)
+    
+        return super().train_rl_step(embeds_inputs, actions, old_log_prob, advantages, returns, old_values, rollout_log_probs,ref_logprobs)
     
 class HabitatRayWorker(LoggingHabitatWorker):
     """

@@ -104,6 +104,7 @@ class VLMWorker:
                 low_cpu_mem_usage=True,
                 attn_implementation = self.attn_implementation).eval()
             self.device = self.model.device
+        self.model.config.use_cache = False
         self.model.to('cuda')
         self.vl_model = self.model.model
         self.language_model = self.vl_model.language_model
@@ -436,7 +437,9 @@ class VLMWorker:
         
     def _calculate_action_logprobs(self,logits):
         import torch
-        logprobs = torch.log_softmax(torch.tensor(logits),dim=-1)
+        if not torch.is_tensor(logits):
+            logits = torch.tensor(logits)
+        logprobs = torch.log_softmax(logits,dim=-1)
         action_logprobs = logprobs[...,self.vocab_ids]
         return action_logprobs
     
@@ -510,9 +513,11 @@ class VLMWrapper(nn.Module):
         self.vlm = vlm # Can be PeftModel
         self._freeze_vision_tower()
 
-    def _forward_embeds(self,embeds_inputs,compute_values=False,detach_value=True):
+    def _forward_embeds(self,embeds_inputs,compute_values=False,value_grad_scale=0.1):
         embeds_inputs = {k:v.to('cuda') for k,v in embeds_inputs.items()}
         embeds_inputs['inputs_embeds'] = embeds_inputs['inputs_embeds'].to(self.vlm.dtype)
+        if self.vlm.training:
+            embeds_inputs['inputs_embeds'].requires_grad_(True)
         embeds_inputs['deepstack_visual_embeds'] = [v.to(self.vlm.dtype) for v in embeds_inputs['deepstack_visual_embeds']]
         logits_to_keep = embeds_inputs.pop('logits_to_keep')
         embeds_inputs.pop('input_ids_reference')
@@ -521,8 +526,15 @@ class VLMWrapper(nn.Module):
         values = None
         if compute_values:
             value_hidden = hidden[:,logits_to_keep].to(self.vlm.value_head.dtype)
-            if detach_value:
-                value_hidden = value_hidden.detach() #prevent gradient pollution
+            if value_grad_scale<=0:
+                # 1. Fully Detached (Old way)
+                value_hidden = value_hidden.detach()
+            
+            else:             
+                # Forward: Identity. Backward: Gradient * scale.
+                value_hidden = (value_hidden * value_grad_scale) + (value_hidden.detach() * (1 - value_grad_scale))
+
+
             values = self.vlm.value_head(value_hidden).squeeze(-1)
         logits = self.vlm.lm_head(hidden[:,logits_to_keep])
         return logits,values
@@ -615,7 +627,7 @@ class VLMTrainingMixin:
             mixed_precision=config.mixed_precision,
             kwargs_handlers=[kwargs]
         )
-        print("accelerator created")
+# or check the accelerator state
         self.gradient_checkpointing =config.gradient_checkpointing
         # 3. Gradient Checkpointing (Must run before PEFT wrapping)
         if config.gradient_checkpointing:
@@ -693,9 +705,9 @@ class VLMTrainingMixin:
         # self.model remains the direct reference (now with LoRA layers attached)
 
         self.ddp_model, self.optimizer,self.scheduler = self.accelerator.prepare(
-            wrapper, optimizer,scheduler
+            wrapper, optimizer, scheduler
         )            
-        
+
     def train_sft_step(self, batch):
         """
         Standard training step.
@@ -722,6 +734,8 @@ class VLMTrainingMixin:
             model = self.model
         embeds_inputs = {k:v.to('cuda') for k,v in rl_embeds_inputs.items()}
         embeds_inputs['inputs_embeds'] = embeds_inputs['inputs_embeds'].to(self.model.dtype)
+        if model.training:
+            embeds_inputs['inputs_embeds'].requires_grad_(True)
         embeds_inputs['deepstack_visual_embeds'] = [v.to(self.model.dtype) for v in embeds_inputs['deepstack_visual_embeds']]
         logits_to_keep = embeds_inputs.pop('logits_to_keep')
         embeds_inputs.pop('input_ids_reference')
@@ -739,7 +753,7 @@ class VLMTrainingMixin:
         output = self.model(**seq_inputs)
         return output.logits
 
-    def train_rl_step(self,embeds_inputs,actions,old_log_prob,advantages,returns=None,old_values=None,rollout_log_prob=None,ref_log_probs=None):
+    def train_rl_step(self,embeds_inputs,actions,old_log_prob,advantages,returns=None,old_values=None,rollout_log_probs=None,ref_log_probs=None):
         '''
         Docstring for train_rl_step
         
@@ -762,7 +776,7 @@ class VLMTrainingMixin:
         # Accumulate gradients (handle micro-batches)
         with self.accelerator.accumulate(self.ddp_model):
             # Forward via DDP wrapper (triggers sync)
-            logits,vpreds = self.ddp_model(embeds_inputs = embeds_inputs,compute_values = self.rl_algo_config.use_value,detach_value=self.rl_algo_config.detach_value)
+            logits,vpreds = self.ddp_model(embeds_inputs = embeds_inputs,compute_values = self.rl_algo_config.use_value,value_grad_scale=self.rl_algo_config.value_grad_scale)
             log_probs = self._calculate_action_logprobs(logits) # B by S by N_action space
             log_prob = torch.gather(log_probs, -1, actions.unsqueeze(-1).to(log_probs.device)).squeeze(-1)
             
@@ -807,6 +821,9 @@ class VLMTrainingMixin:
                 metrics['train/ref_kl_divergence'] = kld.mean().item()
                 loss = loss + (kld * self.rl_algo_config.kl_coeff).mean()
 
+            if rollout_log_probs is not None:
+                kld = compute_full_kl_penalty(log_probs.cpu(),rollout_log_probs.cpu())
+                metrics['train/rollout_kl_divergence'] = kld.mean().item()
             # Backward (handles mixed precision scaling)
             self.accelerator.backward(loss)
             # Clip gradients and return the total norm (Global L2)
@@ -849,6 +866,7 @@ class VLMTrainingMixin:
         
         self.model.save_pretrained(path)
         print(f"Adapters saved to {path}")
+
 class DataGenerator:
     """Generates synthetic turn data."""
     def __init__(self, width=640, height=480, processor=None):

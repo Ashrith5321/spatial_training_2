@@ -41,7 +41,9 @@ with initialize(version_base=None, config_path="conf"):
         "training.grad_accum_steps=4",
         "training.rl_config.gamma=0.6",
         "training.learning_rate=1e-5",
-        "sim.fp_guard=false"
+        "sim.fp_guard=false",
+        "training.rl_config.use_value=false",
+
         # "training.rl_config.policy_loss_name="
     ])
 
