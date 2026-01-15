@@ -27,23 +27,22 @@ register_configs()
 with initialize(version_base=None, config_path="conf"):
     # Here you can list overrides just like you would on the CLI
     cfg = compose(config_name="rl_config", overrides=[
-        "task.run_name=anti_collision_kld",
+        "task.run_name=test_rpp",
         "task.wandb_project=rl_dev",
         "rollout.max_steps=200",
         "vlm.save_outputs=True", # need this for RL
         "task.subset_label=sample400",
         # "sim.split=train_mini",
-        # "task.shard_size=0", # no sharding, fulldataset for everyone
-        "resources.num_vlms=3",
-        "resources.num_sims=4",
+        "task.shard_size=0", # no sharding, fulldataset for everyone
+        "resources.num_vlms=2",
+        "resources.num_sims=3",
         "resources.master_port=25653",
         f"training.rl_config.advantage_estimator={AdvantageEstimator.REINFORCE_PLUS_PLUS}",
-        "training.grad_accum_steps=4",
-        "training.rl_config.gamma=0.6",
+        "training.grad_accum_steps=3",
+        "training.rl_config.gamma=0.9",
         "training.learning_rate=1e-5",
         "sim.fp_guard=false",
         "training.rl_config.use_value=false",
-
         # "training.rl_config.policy_loss_name="
     ])
 
@@ -63,46 +62,46 @@ ray.get(shard_futures)
 
 #
 # # 3. Prepare Data Shards (using simple helper)
-# shard_iter = get_shard_iterator(
-#     subset_label= cfg.task.subset_label,
-#     episode_json= cfg.task.episode_json,
-#     shard_size=cfg.task.shard_size,
-#     logger=logger
-# )
+shard_iter = get_shard_iterator(
+    subset_label= cfg.task.subset_label,
+    episode_json= cfg.task.episode_json,
+    shard_size=cfg.task.shard_size,
+    logger=logger
+)
+trajectory_list = []
+ROLLOUT_SIZE = 12
+N_EPOCH = 3
+EST_BUFF_SIZE = 128
+
+N_EPISODES = 2000
+FREEZE_DATA = False # no longer debugging
 try:
-    for i in range(100):
-        shard_iter = get_shard_iterator(
-            subset_label= cfg.task.subset_label,
-            episode_json= cfg.task.episode_json,
-            shard_size=cfg.task.shard_size,
-            logger=logger
-        )
+    for i in range(10000):
+        if (i+1)*ROLLOUT_SIZE>N_EPISODES or FREEZE_DATA:
+            # reset the dataset
+            shard_iter = get_shard_iterator(
+                subset_label= cfg.task.subset_label,
+                episode_json= cfg.task.episode_json,
+                shard_size=cfg.task.shard_size,
+                logger=logger
+            )
         # ------------------------------------------- rollouts ------------------------------------------
         logger.info("Starting rollout collection!")
 
-        trajectory_list = collect_rollouts(sims,trainers,shard_iter,target_episodes=12) #
+        rollout_list = collect_rollouts(sims,trainers,shard_iter,target_episodes=ROLLOUT_SIZE) #
+
         print("done collecting")
         num_vlms = len(trainers)
-        num_trajectories = len(trajectory_list)
-        remainder = num_trajectories % num_vlms
-
-        if remainder != 0:
-            logger.warning(
-                f"Trajectory count ({num_trajectories}) not divisible by VLM count ({num_vlms}). "
-                f"Discarding last {remainder} trajectories."
-            )
-            trajectory_list = trajectory_list[:-remainder]
-
         # -------------------------------------------unpack and collate the trajectories
 
-        trajectories = [tup[0] for tup in trajectory_list]
-        traj_batch = collate_trajectories(trajectories)
-        model_inputs = [(tup[1],tup[2]) for tup in trajectory_list]
+        trajectory_list += [tup[0] for tup in rollout_list]
+        trajectory_list = trajectory_list[-EST_BUFF_SIZE:]
+        traj_batch = collate_trajectories(trajectory_list)
+        model_inputs = [(tup[1],tup[2]) for tup in rollout_list]
 
         # ---------------------------------- compute gae ----------------------------------------------
-        print("Computing GAE...")
+        print("Computing Advantages")
         config = bootstrapper.resolved_dict['training']['rl_config']
-
         # Note: compute_gae expects (B, T) inputs and returns (B, T)
         advantages, returns = advantage_estimator_fn(
             token_level_rewards=traj_batch['rewards'],
@@ -115,20 +114,41 @@ try:
 
         traj_batch['advantages'] = advantages
         traj_batch['returns'] = returns
-        print(advantages.shape)
+        traj_batch = traj_batch[-ROLLOUT_SIZE:] # only train on most recent.
         print(f"Advantage Mean: {advantages.mean().item():.4f}, Std: {advantages.std().item():.4f}")
 
-        # ------------------------------ dispatch training ----------------------------
+        # ------------------------------ non logged training (extra epochs) ----------
         logger.info("Starting training")
+
+        for i in range(N_EPOCH-1):
+            print(f"epoch {i}")
+            training_futures = []
+            perm_indices = np.random.permutation(ROLLOUT_SIZE) # shuffle
+            for batch_start in range(0, ROLLOUT_SIZE, num_vlms):
+                # Create futures for this specific "global step"
+                # We map workers 0..N to data indices batch_start..batch_start+N
+                step_futures = []
+                for worker_idx, trainer in enumerate(trainers):
+                    global_idx = batch_start + worker_idx
+                    global_idx = perm_indices[global_idx]
+                    # Access the specific inputs and the sliced TensorDict for this index
+                    # We use global_idx to ensure we pull the correct corresponding data
+                    ref = trainer.train_rl_step.remote(
+                            *model_inputs[global_idx], 
+                            traj_batch[global_idx : global_idx + 1, traj_batch['response_mask'][global_idx].bool()]
+                        )
+                    step_futures.append(ref)
+                    future_metadata[ref] = global_idx
+                training_futures.extend(step_futures)
+            ray.get(training_futures)
+        # ------------------------------ dispatch logged training ----------------------------
         future_metadata = {}
         training_futures = []
-        perm_indices = np.random.permutation(len(trajectory_list)) # shuffle
-        for batch_start in range(0, len(trajectory_list), num_vlms):
-            
+        perm_indices = np.random.permutation(ROLLOUT_SIZE) # shuffle
+        for batch_start in range(0, ROLLOUT_SIZE, num_vlms):
             # Create futures for this specific "global step"
             # We map workers 0..N to data indices batch_start..batch_start+N
             step_futures = []
-            
             for worker_idx, trainer in enumerate(trainers):
                 global_idx = batch_start + worker_idx
                 global_idx = perm_indices[global_idx]
@@ -140,10 +160,9 @@ try:
                     )
                 step_futures.append(ref)
                 future_metadata[ref] = global_idx
-                
             training_futures.extend(step_futures)
 
-        print(f"Dispatched {len(training_futures)} training tasks.")
+        print(f"Dispatched {len(training_futures)} training tasks for final epoch")
         # ------------------------------------- monitor training live ---------------------------------
         pending_futures = training_futures
         total_tasks = len(pending_futures)

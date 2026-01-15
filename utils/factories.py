@@ -181,9 +181,10 @@ class ExpBootstrapper:
         
         return vlms, sims, logger
     
-def trivial_shard_iterator() -> Iterator[None]:
+def trivial_shard_iterator(n=256) -> Iterator[None]:
     """Yields the trivial shard (None) once. Habitat handles dataset loading."""
-    yield None
+    for i in range(n):
+        yield None
 
 def chunk_list(all_episodes: List[str], shard_size: int) -> Iterator[List[str]]:
     """Yields chunks of episodes of a specific size."""

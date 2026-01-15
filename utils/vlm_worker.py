@@ -662,7 +662,6 @@ class VLMTrainingMixin:
             if config.peft_config.modules_to_save is None:
                 config.peft_config.modules_to_save = []
             if "value_head" not in config.peft_config.modules_to_save:
-                print("saving value head")
                 config.peft_config.modules_to_save.append("value_head")
             try:
                 peft_kwargs = asdict(config.peft_config)
@@ -812,8 +811,9 @@ class VLMTrainingMixin:
                 loss = pg_loss
 
             if self.rl_algo_config.entropy_bonus is not None:
-                entropy_loss = -compute_entropy_loss(logits,response_mask)*self.rl_algo_config.entropy_bonus
-                metrics['train/entropy_loss'] = entropy_loss.detach().item()
+                entropy = compute_entropy_loss(logits,response_mask)
+                entropy_loss = -entropy*self.rl_algo_config.entropy_bonus
+                metrics['train/entropy'] = entropy.detach().item()
                 loss = loss+entropy_loss
 
             if ref_log_probs is not None and self.rl_algo_config.kl_coeff is not None:
