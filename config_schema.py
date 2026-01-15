@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 @dataclass
 class ResourceConfig:
     ray_address: str = "local"
+    object_spilling_directory: str = "./ray_object_spilling"
     vlm_resource_tag: str = "env_a"
     sim_resource_tag: str = "env_b"
     master_addr: str = 'localhost'

@@ -128,9 +128,10 @@ class ExpBootstrapper:
             ray.init(
                 resources={
                     res.vlm_resource_tag: res.num_vlms, 
-                    res.sim_resource_tag: res.num_sims
+                    res.sim_resource_tag: res.num_sims,
                 },
-                ignore_reinit_error=True
+                ignore_reinit_error=True,
+                object_spilling_directory = res.object_spilling_directory
             )
         else:
             ray.init(address=res.ray_address, ignore_reinit_error=True)

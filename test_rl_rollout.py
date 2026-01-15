@@ -38,10 +38,10 @@ with initialize(version_base=None, config_path="conf"):
         "resources.num_sims=3",
         "resources.master_port=25653",
         # f"training.rl_config.advantage_estimator={AdvantageEstimator.REINFORCE_PLUS_PLUS}",
-        f"training.rl_config.advantage_estimator=reinforce_plus_plus_linear_time_aware",
+        f"training.rl_config.advantage_estimator=reinforce_plus_plus_geometric_time_aware",
         "training.grad_accum_steps=3",
-        "training.rl_config.gamma=0.9",
-        "training.learning_rate=1e-5",
+        "training.rl_config.gamma=0.95",
+        "training.learning_rate=2e-5",
         "sim.fp_guard=false",
         "training.rl_config.use_value=false",
         # "training.rl_config.policy_loss_name="

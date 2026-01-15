@@ -209,76 +209,153 @@ def compute_reinforce_plus_plus_linear_time_aware_advantage(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute REINFORCE++ advantages using a Linear Time-Decay Baseline.
-    
-    Logic:
-    1. Calculate discounted returns G_t for all steps.
-    2. Fit a global linear trend line V(t) = m*t + c to the (t, G_t) pairs.
-       This captures the natural decay of potential return as the episode progresses.
-    3. Advantage is the residual: A_t = G_t - V(t).
-    
-    This fixes the bias where early steps (high G_t) inherently overshadow late steps (low G_t).
+    Fixes applied:
+    1. Numerical Stability: Regressions calculated in float32 to prevent cancellation.
+    2. End-Alignment: Uses negative time (t - seq_len) to align goal states.
     """
     assert config is not None
     gamma = config.gamma
     device = token_level_rewards.device
-    dtype = token_level_rewards.dtype
     
     # 1. Compute Standard Discounted Returns (G_t)
-    #    Same logic as the standard outcome_advantage function
     with torch.no_grad():
         returns = torch.zeros_like(token_level_rewards)
         running_return = 0
 
-        # Iterate backwards
         for t in reversed(range(token_level_rewards.shape[1])):
             running_return = token_level_rewards[:, t] + gamma * running_return
             returns[:, t] = running_return
-            # Standard masking: reset return if the current token is masked (padding/EOS)
             running_return = running_return * response_mask[:, t]
 
         # 2. Prepare Data for Linear Regression
-        #    We want to fit: G_t ~ m * t + c
         bs, seq_len = returns.shape
+        seq_lengths = response_mask.sum(dim=-1)
         
-        # Create a time index grid: [[0, 1, 2...], [0, 1, 2...]]
-        time_indices = torch.arange(seq_len, device=device, dtype=dtype).unsqueeze(0).expand(bs, seq_len)
+        # Create time indices. IMPORTANT: Use float32 for the grid to avoid casting later
+        time_indices = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0).expand(bs, seq_len)
+        
+        # ALIGNMENT FIX: Shift time so the last step is roughly 0 (or -1). 
+        # t_new goes from [-Length, 0]. 
+        # This aligns the "End of Episode" across the batch.
+        time_indices = time_indices - seq_lengths.unsqueeze(1)
 
-        # Flatten and Mask: Only fit the line to VALID tokens
+        # Flatten and Mask
         valid_mask = response_mask.bool()
-        x_flat = time_indices[valid_mask]  # Shape: [N_total_tokens]
-        y_flat = returns[valid_mask]       # Shape: [N_total_tokens]
+        
+        # NUMERICAL STABILITY FIX: Ensure inputs to regression are float32
+        x_flat = time_indices[valid_mask].to(torch.float32) 
+        y_flat = returns[valid_mask].to(torch.float32)
         
         N = x_flat.numel()
         
         if N > 1:
-            # 3. Closed-Form Linear Least Squares
-            #    Formula: m = (N*Σxy - ΣxΣy) / (N*Σx² - (Σx)²)
-            #             c = (Σy - m*Σx) / N
+            # 3. Closed-Form Linear Least Squares (Weighted by data points)
             sum_x = x_flat.sum()
             sum_y = y_flat.sum()
             sum_xy = (x_flat * y_flat).sum()
             sum_xx = (x_flat * x_flat).sum()
 
-            denominator = N * sum_xx - sum_x * sum_x + 1e-8
+            # Denominator: N*Var(x). 
+            # Adding epsilon is crucial for short sequences where Var(x) might be 0.
+            denominator = N * sum_xx - sum_x * sum_x + 1e-6
+            
             m = (N * sum_xy - sum_x * sum_y) / denominator
             c = (sum_y - m * sum_x) / N
 
-            # 4. Compute Baseline and Residuals
-            #    Apply the trend line back to the full tensor shape
+            # 4. Compute Baseline 
+            # Cast back to original dtype for subtraction if needed, or keep as float32 for precision
             baseline = m * time_indices + c
             
-            # The Advantage is the "Surprise" (Residual)
-            # A positive advantage means you have more return than the average agent does at this specific timestamp.
-            advantages = returns - baseline
+            # The Advantage is the Residual (Actual - Predicted)
+            # We cast baseline to the return's dtype (e.g., bfloat16) to match
+            advantages = returns - baseline.to(returns.dtype)
         else:
-            # Fallback for empty batch or single token
             advantages = returns
 
-        # 5. Whiten the Residuals
-        #    We normalize the residuals so the optimizer sees unit variance
+        # 5. Whiten the Residuals (Standardize variance)
         advantages = verl_F.masked_whiten(advantages, response_mask)
+        advantages = advantages * response_mask
+
+    return advantages, returns
+
+@register_adv_est("reinforce_plus_plus_geometric_time_aware")
+def compute_reinforce_plus_plus_geometric_time_aware_advantage(
+    token_level_rewards: torch.Tensor, 
+    response_mask: torch.Tensor, 
+    config: Optional[AlgoConfig] = None, 
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute REINFORCE++ advantages using a Linear Time-Decay Baseline.
+    Fixes applied:
+    1. Numerical Stability: Regressions calculated in float32 to prevent cancellation.
+    2. End-Alignment: Uses negative time (t - seq_len) to align goal states.
+    """
+    assert config is not None
+    gamma = config.gamma
+    device = token_level_rewards.device
+    
+    # 1. Compute Standard Discounted Returns (G_t)
+    with torch.no_grad():
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+
+        for t in reversed(range(token_level_rewards.shape[1])):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            running_return = running_return * response_mask[:, t]
+
+        # 2. Prepare Data for Linear Regression
+        bs, seq_len = returns.shape
+        seq_lengths = response_mask.sum(dim=-1)
+
+        # Create time indices. IMPORTANT: Use float32 for the grid to avoid casting later
+        time_indices = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0).expand(bs, seq_len)
+        # Calculate Discounted Horizon Basis: S(h) = (1 - gamma^h) / (1 - gamma)
+        # Horizon (Time-to-Go) = Total Length - Current Time Step
+        horizon = seq_lengths.unsqueeze(1) - time_indices
+        # Transform input feature to match the geometric shape of discounted returns
+        # This ensures the regression fits the "Curve" of returns, not just a Line.
+        if abs(1.0 - gamma) < 1e-6:
+            time_indices = horizon
+        else:
+            time_indices = (1.0 - torch.pow(gamma, horizon)) / (1.0 - gamma)
+
+        # Flatten and Mask
+        valid_mask = response_mask.bool()
         
-        # Re-apply mask to ensure padding tokens are strictly 0
+        # NUMERICAL STABILITY FIX: Ensure inputs to regression are float32
+        x_flat = time_indices[valid_mask].to(torch.float32) 
+        y_flat = returns[valid_mask].to(torch.float32)
+        
+        N = x_flat.numel()
+        
+        if N > 1:
+            # 3. Closed-Form Linear Least Squares (Weighted by data points)
+            sum_x = x_flat.sum()
+            sum_y = y_flat.sum()
+            sum_xy = (x_flat * y_flat).sum()
+            sum_xx = (x_flat * x_flat).sum()
+
+            # Denominator: N*Var(x). 
+            # Adding epsilon is crucial for short sequences where Var(x) might be 0.
+            denominator = N * sum_xx - sum_x * sum_x + 1e-6
+            
+            m = (N * sum_xy - sum_x * sum_y) / denominator
+            c = (sum_y - m * sum_x) / N
+
+            # 4. Compute Baseline 
+            # Cast back to original dtype for subtraction if needed, or keep as float32 for precision
+            baseline = m * time_indices + c
+            
+            # The Advantage is the Residual (Actual - Predicted)
+            # We cast baseline to the return's dtype (e.g., bfloat16) to match
+            advantages = returns - baseline.to(returns.dtype)
+        else:
+            advantages = returns
+
+        # 5. Whiten the Residuals (Standardize variance)
+        advantages = verl_F.masked_whiten(advantages, response_mask)
         advantages = advantages * response_mask
 
     return advantages, returns
