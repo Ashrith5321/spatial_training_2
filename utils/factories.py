@@ -128,13 +128,28 @@ class RLWorkerFactory:
         # Auto-detect rendezvous point for the workers
         world_size = len(workers)        
         futures = []
+        if res_cfg.master_port is None:
+            import socket
+
+            def find_free_port():
+                # Create a new socket
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    # Bind to an empty address/port, letting the OS pick a free port (port 0)
+                    s.bind(('', 0))
+                    # Return the port number assigned by the OS
+                    return s.getsockname()[1]
+
+            # Usage:
+            master_port = find_free_port()
+        else:
+            master_port = res_cfg.master_port
         for rank, w in enumerate(workers):
             futures.append(w.setup_training.remote(
                 config=train_cfg,
                 rank=rank,
                 world_size=world_size,
                 master_addr=res_cfg.master_addr,
-                master_port=res_cfg.master_port,
+                master_port=master_port,
             ))
        
         return futures

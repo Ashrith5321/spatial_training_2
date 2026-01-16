@@ -359,3 +359,120 @@ def compute_reinforce_plus_plus_geometric_time_aware_advantage(
         advantages = advantages * response_mask
 
     return advantages, returns
+
+def _solve_linear_regression(x: torch.Tensor, y: torch.Tensor) -> tuple[float, float]:
+    """
+    Solves y = mx + c using Closed-Form Least Squares.
+    Expects x, y to be flat 1D tensors of shape (N,).
+    Returns (m, c). Returns (0.0, 0.0) if N < 2.
+    """
+    N = x.numel()
+    if N < 2:
+        return 0.0, 0.0
+
+    sum_x = x.sum()
+    sum_y = y.sum()
+    sum_xy = (x * y).sum()
+    sum_xx = (x * x).sum()
+
+    # Denominator: N * Var(x)
+    denominator = N * sum_xx - sum_x * sum_x + 1e-6
+    
+    m = (N * sum_xy - sum_x * sum_y) / denominator
+    c = (sum_y - m * sum_x) / N
+    
+    return m, c
+
+def _fit_robust_baseline(
+    x_flat: torch.Tensor, 
+    y_flat: torch.Tensor, 
+    sigma_threshold: float = 3.0
+) -> tuple[float, float]:
+    """
+    Performs a Two-Pass Robust Regression to reject outliers.
+    """
+    # Pass 1: Initial Fit
+    m, c = _solve_linear_regression(x_flat, y_flat)
+    
+    # If not enough data, return early
+    if x_flat.numel() < 10: 
+        return m, c
+
+    # Pass 2: Outlier Rejection
+    preds = m * x_flat + c
+    residuals = torch.abs(y_flat - preds)
+    std_res = residuals.std()
+    
+    # Filter: Keep points within sigma_threshold (e.g., 3.0)
+    # 1e-6 prevents filtering if variance is zero
+    clean_mask = residuals < (sigma_threshold * std_res + 1e-6)
+    
+    # Only refit if we have a healthy subset left (>50% data)
+    if clean_mask.sum() > (x_flat.numel() // 2):
+        return _solve_linear_regression(x_flat[clean_mask], y_flat[clean_mask])
+    
+    return m, c
+
+@register_adv_est("reinforce_plus_plus_geometric_robust")
+def compute_reinforce_plus_plus_geometric_robust_advantage(
+    token_level_rewards: torch.Tensor, 
+    response_mask: torch.Tensor, 
+    config: Optional[AlgoConfig] = None, 
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute REINFORCE++ advantages using a Linear Time-Decay Baseline.
+    Fixes applied:
+    1. Numerical Stability: Regressions calculated in float32 to prevent cancellation.
+    2. End-Alignment: Uses negative time (t - seq_len) to align goal states.
+    """
+    assert config is not None
+    gamma = config.gamma
+    device = token_level_rewards.device
+    
+    # 1. Compute Standard Discounted Returns (G_t)
+    with torch.no_grad():
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+
+        for t in reversed(range(token_level_rewards.shape[1])):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            running_return = running_return * response_mask[:, t]
+
+        # 2. Prepare Data for Linear Regression
+        bs, seq_len = returns.shape
+        seq_lengths = response_mask.sum(dim=-1)
+
+        # Create time indices. IMPORTANT: Use float32 for the grid to avoid casting later
+        time_indices = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0).expand(bs, seq_len)
+        # Calculate Discounted Horizon Basis: S(h) = (1 - gamma^h) / (1 - gamma)
+        # Horizon (Time-to-Go) = Total Length - Current Time Step
+        horizon = seq_lengths.unsqueeze(1) - time_indices
+        # Transform input feature to match the geometric shape of discounted returns
+        # This ensures the regression fits the "Curve" of returns, not just a Line.
+        if abs(1.0 - gamma) < 1e-6:
+            time_indices = horizon
+        else:
+            time_indices = (1.0 - torch.pow(gamma, horizon)) / (1.0 - gamma)
+
+        # Flatten and Mask
+        valid_mask = response_mask.bool()
+        
+        # NUMERICAL STABILITY FIX: Ensure inputs to regression are float32
+        x_flat = time_indices[valid_mask].to(torch.float32) 
+        y_flat = returns[valid_mask].to(torch.float32)
+        
+        m, c = _fit_robust_baseline(x_flat, y_flat, sigma_threshold=3.0)
+            # 4. Compute Baseline 
+            # Cast back to original dtype for subtraction if needed, or keep as float32 for precision
+        baseline = m * time_indices + c
+            # The Advantage is the Residual (Actual - Predicted)
+            # We cast baseline to the return's dtype (e.g., bfloat16) to match
+        advantages = returns - baseline.to(returns.dtype)
+       
+        # 5. Whiten the Residuals (Standardize variance)
+        advantages = verl_F.masked_whiten(advantages, response_mask)
+        advantages = advantages * response_mask
+
+    return advantages, returns
