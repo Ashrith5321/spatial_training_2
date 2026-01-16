@@ -1,6 +1,6 @@
 # @package _global_
 task:
-  run_name: rpp_t_rwd_fix
+  run_name: rpp_t_rwd_fix_rerun
   wandb_project: rl_dev
   shard_size: 0
   subset_label: ""
