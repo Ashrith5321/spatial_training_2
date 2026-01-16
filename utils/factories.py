@@ -108,13 +108,15 @@ class RLWorkerFactory:
     def create(vlm_dict: dict, rollout_dict: dict, res_cfg: ResourceConfig):
         # res_cfg is fine to keep as object for resource logic
         from utils.inference_core import RLRayWorker
-        
+        env_dict = None
+        if res_cfg.vlm_conda_env is not None:
+            env_dict = {"conda": res_cfg.vlm_conda_env}
         # We use the dicts directly to avoid pickling issues
         RemoteRLWorker = ray.remote(RLRayWorker).options(
             resources={res_cfg.vlm_resource_tag: 1},
             num_cpus=res_cfg.vlm_cpus,
             num_gpus=res_cfg.vlm_gpu_fraction,
-            runtime_env={"conda": res_cfg.vlm_conda_env}
+            runtime_env=env_dict
         )
         workers =  [
             RemoteRLWorker.remote(
@@ -158,12 +160,14 @@ class SimWorkerFactory:
     @staticmethod
     def create(sim_dict: dict, res_cfg: ResourceConfig, task_cfg: RunConfig, logger_actor=None):
         from utils.inference_core import HabitatRayWorker
-        
+        env_dict = None
+        if res_cfg.habitat_conda_env is not None:
+            env_dict = {"conda": res_cfg.habitat_conda_env}
         RemoteSim = ray.remote(HabitatRayWorker).options(
             resources={res_cfg.sim_resource_tag: 1},
             num_cpus=res_cfg.sim_cpus,
             num_gpus=res_cfg.sim_gpu_fraction,
-            runtime_env={"conda": res_cfg.habitat_conda_env}
+            runtime_env=env_dict
         )
 
         handles = []

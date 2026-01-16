@@ -5,7 +5,7 @@ task:
   shard_size: 0
   jobtype: train
 resources:
-  ray_address: local
+  ray_address: '10.164.33.175:6379'
   object_spilling_directory: /caches/ray_object_spilling
   vlm_resource_tag: env_a
   sim_resource_tag: env_b
@@ -13,8 +13,8 @@ resources:
   master_port: null
   num_vlms: 3
   num_sims: 4
-  vlm_conda_env: vlm_node_1016
-  habitat_conda_env: vln
+  vlm_conda_env: null
+  habitat_conda_env: null
   vlm_gpu_fraction: 0.7
   sim_gpu_fraction: 0.14
   vlm_cpus: 4
@@ -63,12 +63,12 @@ training:
   checkpoint: null
   load_optim: false
   load_sched: false
-  learning_rate: 1.0e-05
+  learning_rate: 2.0e-05
   grad_accum_steps: 2
   mixed_precision: 'no'
   gradient_checkpointing: true
   total_optimization_steps: 20000
-  save_step: 10
+  save_step: 8
   peft_config:
     r: 128
     lora_alpha: 256
@@ -99,7 +99,7 @@ training:
       clip_cov_ratio: 0.0002
       clip_cov_ub: 5.0
       clip_cov_lb: 1.0
-    gamma: 0.95
+    gamma: 0.97
     lam: 0.95
     cliprange_value: 0.2
     entropy_bonus: 0.0

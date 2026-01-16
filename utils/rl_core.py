@@ -51,7 +51,7 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
             if key in ['rewards', 'values', 'old_logprobs', 'logprobs', 'ref_logprobs']:
                 t = t.float() # Ensure float32
             elif key in ['actions']:
-                t = t.int()  # Ensure int32 for pointer
+                t = t.long()  # Ensure int32 for pointer
             tensors.append(t)
             
         # Pad Sequence

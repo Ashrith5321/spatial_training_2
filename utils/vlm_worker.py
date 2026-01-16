@@ -8,7 +8,6 @@ import os
 from typing import Optional, Any, List
 from collections import defaultdict
 import torch.nn as nn
-from accelerate import Accelerator
 from torch.optim import AdamW
 from dataclasses import dataclass,field
 # from transformers.models.qwen3_vl.modeling_qwen3_vl import rotate_half
@@ -605,6 +604,7 @@ class VLMWrapper(nn.Module):
 
 class VLMTrainingMixin:
     from config_schema import VLMTrainingConfig
+
     def setup_training(self, config: VLMTrainingConfig, rank: int,
     world_size: int,
     master_addr: str,
@@ -614,6 +614,8 @@ class VLMTrainingMixin:
         """
         from accelerate import DistributedDataParallelKwargs
         from transformers import get_scheduler
+        from accelerate import Accelerator
+
         kwargs = DistributedDataParallelKwargs(find_unused_parameters=False) #prevent value head from being killed
         # 1. Manual Environment Injection for Ray
         os.environ["MASTER_ADDR"] = master_addr

@@ -113,7 +113,7 @@ def main(cfg: RLConfig):
             logger=logger
         )
         num_rollouts = bootstrapper.typed_cfg.training.total_optimization_steps*bootstrapper.typed_cfg.training.grad_accum_steps//bootstrapper.typed_cfg.training.rl_config.n_rollout
-        for i in range(num_rollouts):
+        for rollout_idx in range(num_rollouts):
             if FREEZE_DATA:
                 # reset the dataset
                 shard_iter = get_shard_iterator(
@@ -238,7 +238,7 @@ def main(cfg: RLConfig):
                     except Exception as e:
                         logger.error(f"[{completed_count}/{total_tasks}] Task failed: {e}")
             #------------------------------------ save checkpoint ------------------------------------
-            if (i+1) % bootstrapper.typed_cfg.training.save_step == 0:
+            if (rollout_idx+1) % bootstrapper.typed_cfg.training.save_step == 0:
                 print("saving checkpoint")
                 ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{i}")))
     finally:
