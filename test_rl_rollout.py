@@ -27,9 +27,9 @@ register_configs()
 with initialize(version_base=None, config_path="conf"):
     # Here you can list overrides just like you would on the CLI
     cfg = compose(config_name="rl_config", overrides=[
-        "task.run_name=rpp_t",
+        "task.run_name=rpp_t_lpfix_tp1",
         "task.wandb_project=rl_dev",
-        "rollout.max_steps=300",
+        "rollout.max_steps=350",
         "vlm.save_outputs=True", # need this for RL
         "task.subset_label=sample400",
         "sim.split=train_mini",

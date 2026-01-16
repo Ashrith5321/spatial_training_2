@@ -336,7 +336,7 @@ class VLMWorker:
             "logits_to_keep": self._get_sparse_logit_indices().cpu()
         }
 
-    def infer_step(self,messages,images,full_logprobs=False,temperature=1.2,check_probs=True,crop_inputs=True,pos_id_kwargs=None):
+    def infer_step(self,messages,images,full_logprobs=False,temperature=1.0,check_probs=True,crop_inputs=True,pos_id_kwargs=None):
         t0 = time.time()
         self.model.gradient_checkpointing_disable()
         self.model.eval()
@@ -402,7 +402,12 @@ class VLMWorker:
             self.past_key_values = outputs['past_key_values']
              # Compute logprobs directly (1-to-1 mapping)
             relevant_logits = outputs.logits[0].float()
-            all_logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
+            if not full_logprobs:
+                relevant_logits = relevant_logits[...,self.vocab_ids]
+            if np.abs(temperature-1.0) > 1e-7:
+                logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
+            else:
+                logprobs = torch.log_softmax(relevant_logits, dim=-1)
             # print(f"vlm latency: {time.time()-t}",end=" ")
 
             if self.save_outputs:
@@ -423,24 +428,21 @@ class VLMWorker:
                     for idx, image_embeds in enumerate(self.language_model.kept_visual_embeds):
                         self.past_image_embeds[idx] = torch.cat((self.past_image_embeds[idx],image_embeds)) #handle the batching...
                 # print(f"store sparse states time: {time.time()-t}",end=" ")
-        if check_probs:
-            try:
-                assert(torch.argmax(all_logprobs,dim=-1).item() in self.vocab_ids)
-            except:
-                print("WARNING: prediction not in provided vocab")
+        # if check_probs:
+        #     try:
+        #         assert(torch.argmax(logprobs,dim=-1).item() in self.vocab_ids)
+        #     except:
+        #         print("WARNING: prediction not in provided vocab")
         # # print("inference done!")
         # print(f" total time: {time.time()-t0}")
-        if full_logprobs:
-            return all_logprobs.cpu().float().numpy(),outputs
-        else:
-            return all_logprobs[:,self.vocab_ids].cpu().float().numpy(),outputs
+        return logprobs.cpu().float().numpy(),outputs
+
         
     def _calculate_action_logprobs(self,logits):
         import torch
         if not torch.is_tensor(logits):
             logits = torch.tensor(logits)
-        logprobs = torch.log_softmax(logits,dim=-1)
-        action_logprobs = logprobs[...,self.vocab_ids]
+        action_logprobs = torch.log_softmax(logits[...,self.vocab_ids],dim=-1)
         return action_logprobs
     
     def infer_probs(self,messages,images,**kwargs):
