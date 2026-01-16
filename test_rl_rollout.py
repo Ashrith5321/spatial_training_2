@@ -27,23 +27,25 @@ register_configs()
 with initialize(version_base=None, config_path="conf"):
     # Here you can list overrides just like you would on the CLI
     cfg = compose(config_name="rl_config", overrides=[
-        "task.run_name=test_rpp",
+        "task.run_name=rpp_t",
         "task.wandb_project=rl_dev",
-        "rollout.max_steps=200",
+        "rollout.max_steps=300",
         "vlm.save_outputs=True", # need this for RL
         "task.subset_label=sample400",
-        # "sim.split=train_mini",
+        "sim.split=train_mini",
         "task.shard_size=0", # no sharding, fulldataset for everyone
         "resources.num_vlms=2",
         "resources.num_sims=3",
-        "resources.master_port=25653",
+        "resources.master_port=25657",
         # f"training.rl_config.advantage_estimator={AdvantageEstimator.REINFORCE_PLUS_PLUS}",
         f"training.rl_config.advantage_estimator=reinforce_plus_plus_geometric_time_aware",
-        "training.grad_accum_steps=3",
+        "training.grad_accum_steps=2",
         "training.rl_config.gamma=0.95",
         "training.learning_rate=2e-5",
         "sim.fp_guard=false",
         "training.rl_config.use_value=false",
+        "training.save_step=100"
+        # "training.checkpoint=/Projects/spatial_training/test_checkpoint"
         # "training.rl_config.policy_loss_name="
     ])
 
@@ -58,6 +60,7 @@ trainers = bootstrapper.bootstrap_vlms_rl() #allocate vlms first to prevent out 
 wandb_actor = bootstrapper.bootstrap_logger()
 sim_logger = None
 sims = bootstrapper.bootstrap_sims(sim_logger)
+
 # shard_futures = [sim.assign_shard.remote(None) for sim in sims]
 # ray.get(shard_futures)
 
@@ -70,15 +73,12 @@ shard_iter = get_shard_iterator(
     logger=logger
 )
 trajectory_list = []
-ROLLOUT_SIZE = 12
-N_EPOCH = 2
-EST_BUFF_SIZE = 256
 
-N_EPISODES = 2000
+N_EPISODES = 10000 #10k for train_mini, 2k for val
 FREEZE_DATA = False # no longer debugging
 try:
     for i in range(10000):
-        if (i+1)*ROLLOUT_SIZE>N_EPISODES or FREEZE_DATA:
+        if (i+1)*bootstrapper.typed_cfg.training.rl_config.n_rollout>N_EPISODES or FREEZE_DATA:
             # reset the dataset
             shard_iter = get_shard_iterator(
                 subset_label= cfg.task.subset_label,
@@ -89,14 +89,14 @@ try:
         # ------------------------------------------- rollouts ------------------------------------------
         logger.info("Starting rollout collection!")
 
-        rollout_list = collect_rollouts(sims,trainers,shard_iter,target_episodes=ROLLOUT_SIZE) #
+        rollout_list = collect_rollouts(sims,trainers,shard_iter,target_episodes=bootstrapper.typed_cfg.training.rl_config.n_rollout) #
 
         print("done collecting")
         num_vlms = len(trainers)
         # -------------------------------------------unpack and collate the trajectories
 
         trajectory_list += [tup[0] for tup in rollout_list]
-        trajectory_list = trajectory_list[-EST_BUFF_SIZE:]
+        trajectory_list = trajectory_list[-bootstrapper.typed_cfg.training.rl_config.n_adv:]
         traj_batch = collate_trajectories(trajectory_list)
         model_inputs = [(tup[1],tup[2]) for tup in rollout_list]
 
@@ -115,17 +115,17 @@ try:
 
         traj_batch['advantages'] = advantages
         traj_batch['returns'] = returns
-        traj_batch = traj_batch[-ROLLOUT_SIZE:] # only train on most recent.
+        traj_batch = traj_batch[-bootstrapper.typed_cfg.training.rl_config.n_rollout:] # only train on most recent.
         print(f"Advantage Mean: {advantages.mean().item():.4f}, Std: {advantages.std().item():.4f}")
 
         # ------------------------------ non logged training (extra epochs) ----------
         logger.info("Starting training")
 
-        for i in range(N_EPOCH-1):
+        for i in range(bootstrapper.typed_cfg.training.rl_config.n_epoch-1):
             print(f"epoch {i}")
             training_futures = []
-            perm_indices = np.random.permutation(ROLLOUT_SIZE) # shuffle
-            for batch_start in range(0, ROLLOUT_SIZE, num_vlms):
+            perm_indices = np.random.permutation(bootstrapper.typed_cfg.training.rl_config.n_rollout) # shuffle
+            for batch_start in range(0, bootstrapper.typed_cfg.training.rl_config.n_rollout, num_vlms):
                 # Create futures for this specific "global step"
                 # We map workers 0..N to data indices batch_start..batch_start+N
                 step_futures = []
@@ -144,8 +144,8 @@ try:
         # ------------------------------ dispatch logged training ----------------------------
         future_metadata = {}
         training_futures = []
-        perm_indices = np.random.permutation(ROLLOUT_SIZE) # shuffle
-        for batch_start in range(0, ROLLOUT_SIZE, num_vlms):
+        perm_indices = np.random.permutation(bootstrapper.typed_cfg.training.rl_config.n_rollout) # shuffle
+        for batch_start in range(0, bootstrapper.typed_cfg.training.rl_config.n_rollout, num_vlms):
             # Create futures for this specific "global step"
             # We map workers 0..N to data indices batch_start..batch_start+N
             step_futures = []
@@ -201,6 +201,10 @@ try:
                     
                 except Exception as e:
                     logger.error(f"[{completed_count}/{total_tasks}] Task failed: {e}")
+        #------------------------------------ save checkpoint ------------------------------------
+        if (i+1) % bootstrapper.typed_cfg.training.save_step == 0:
+            print("saving checkpoint")
+            ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{i}")))
 
 finally:
     for trainer in trainers:

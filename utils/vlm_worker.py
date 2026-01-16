@@ -600,6 +600,7 @@ class VLMWrapper(nn.Module):
         else:
             # Fallback info if architecture is exotic
             print("[VLMWrapper] Info: Could not auto-detect Vision Tower module to safeguard. Assuming it is correctly frozen.")
+
 class VLMTrainingMixin:
     from config_schema import VLMTrainingConfig
     def setup_training(self, config: VLMTrainingConfig, rank: int,
@@ -666,7 +667,12 @@ class VLMTrainingMixin:
             try:
                 peft_kwargs = asdict(config.peft_config)
             except:
-                peft_kwargs = config.peft_config
+                from omegaconf import OmegaConf
+                peft_kwargs = OmegaConf.to_container(config.peft_config,resolve=True)
+            for key in ["target_modules", "modules_to_save", "modules_to_freeze"]:
+                if key in peft_kwargs and peft_kwargs[key] is not None:
+                    # The magic fix: list() casts ListConfig -> list
+                    peft_kwargs[key] = list(peft_kwargs[key])
 
             real_peft_config = LoraConfig(**peft_kwargs)
             self.model = get_peft_model(self.model, real_peft_config)
@@ -699,6 +705,7 @@ class VLMTrainingMixin:
             num_warmup_steps=10, # Short warmup usually sufficient for RL
             num_training_steps=config.total_optimization_steps
         )
+
         # 6. Prepare with Accelerator
         # self.ddp_model becomes the sync-wrapper
         # self.model remains the direct reference (now with LoRA layers attached)
@@ -706,6 +713,9 @@ class VLMTrainingMixin:
         self.ddp_model, self.optimizer,self.scheduler = self.accelerator.prepare(
             wrapper, optimizer, scheduler
         )            
+
+        if config.checkpoint is not None:
+            self.load_checkpoint(config.checkpoint,config.load_optim,config.load_sched)
 
     def train_sft_step(self, batch):
         """
@@ -856,16 +866,74 @@ class VLMTrainingMixin:
             # unwrapped.vlm.save_pretrained(path)
             self.model.save_pretrained(path)
             print(f"Adapters saved to {path}")
+
     def save_adapter_unsafe(self, path):
         """
         Saves ONLY the LoRA adapters. 
-        Safe to call from Ray actor (handles rank check internally).
+        Driver script is responsible for making the other VLM workers stay put, hence "unsafe"
         """
-        # Wait for all workers to finish their current step
-        self.accelerator.wait_for_everyone()
         
         self.model.save_pretrained(path)
         print(f"Adapters saved to {path}")
+
+    def save_checkpoint_unsafe(self, path):
+        """
+        Ray-Optimized Saver. 
+        NO BARRIERS. Call this ONLY on Rank 0 (Worker[0]).
+        The Driver script MUST ensure all other workers are idle/waiting 
+        via ray.get() before triggering this.
+        """
+        import os
+        os.makedirs(path, exist_ok=True)
+        # 1. Save Model (Adapters)
+        # Standard DDP models are replicated, so Rank 0 has everything.
+        # save_pretrained is a local I/O operation.
+        self.model.save_pretrained(path)
+        # 2. Save Optimizer & Scheduler
+        # In Standard DDP, optimizer states are identical across ranks.
+        # Saving Rank 0's copy is sufficient to restore training.
+        torch.save(self.optimizer.state_dict(), os.path.join(path, "optimizer.pt"))
+        torch.save(self.scheduler.state_dict(), os.path.join(path, "scheduler.pt"))
+        print(f"✅ Checkpoint saved to: {path}")
+
+    def load_checkpoint(self, path, strict_base_check=True,load_optim=True,load_sched=True):
+        """
+        Resumes training state fully. 
+        Must be called AFTER setup_training().
+        """
+        import os
+        from peft.utils import set_peft_model_state_dict, load_peft_weights
+        from utils.factories import get_base_model
+        # 1. Base Model Check
+        
+        if strict_base_check:
+            saved_base = get_base_model(path)
+            if  saved_base is None:
+                print(f"⚠️ WARNING: no base model name found")
+            elif self.model_id not in saved_base and saved_base not in self.model_id:
+                print(f"⚠️ WARNING: Checkpoint base '{saved_base}' != Current '{self.model_id}'")
+        # 2. Load Weights (Adapters + Value Head)
+        # This updates self.model in-place, preserving optimizer references
+        if os.path.exists(os.path.join(path, "adapter_model.bin")) or os.path.exists(os.path.join(path, "adapter_model.safetensors")):
+             adapter_state_dict = load_peft_weights(path)
+             set_peft_model_state_dict(self.model, adapter_state_dict)
+             print(" -> Adapters and Value Head loaded.")
+        else:
+             print(" -> ⚠️ No adapter weights found in checkpoint.")
+
+        # 3. Load Optimizer
+        opt_path = os.path.join(path, "optimizer.pt")
+        if os.path.exists(opt_path) and load_optim:
+            opt_state = torch.load(opt_path, map_location=self.accelerator.device)
+            self.optimizer.load_state_dict(opt_state)
+            print(" -> Optimizer loaded.")
+        
+        # 4. Load Scheduler
+        sched_path = os.path.join(path, "scheduler.pt")
+        if os.path.exists(sched_path) and load_sched:
+            sched_state = torch.load(sched_path, map_location=self.accelerator.device)
+            self.scheduler.load_state_dict(sched_state)
+            print(" -> Scheduler loaded.")
 
 class DataGenerator:
     """Generates synthetic turn data."""

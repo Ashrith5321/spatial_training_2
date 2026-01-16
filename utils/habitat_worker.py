@@ -255,7 +255,7 @@ def get_scene_id(scene_path):
     return scene_id
 
 class HabitatWorker:
-    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None):
+    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None,ep_seed=None):
         from habitat.config.default import get_config
         from habitat.config import read_write
         from habitat.config.default_structured_configs import (
@@ -321,6 +321,9 @@ class HabitatWorker:
         self.full_dataset = make_dataset(
             self.config_env.habitat.dataset.type, config=self.config_env.habitat.dataset
         )
+        self.ep_seed = ep_seed
+      
+
         if assigned_episode_labels is not None:
             self.assign_shard(assigned_episode_labels)
         else:
@@ -361,15 +364,20 @@ class HabitatWorker:
         with suppress_cpp_output():
             self.env = make_gym_from_config(self.config_env,dataset)
         # self.env = make_gym_from_config(self.config_env,dataset)
-
+        if self.ep_seed is not None:
+            seed = self.ep_seed
+        else:
+            np.random.seed(os.getpid())
+            seed = np.random.randint(0,100000)
+            print(f"using seed: {seed}")
         # Setup Iterator 
         self.env.habitat_env.episode_iterator = EpisodeIterator(
             dataset.episodes,
             cycle=True,
             shuffle=True,
             group_by_scene=False,
-            seed=17,
-            # max_scene_repeat_episodes=10
+            seed=seed,
+            max_scene_repeat_episodes=4
         )
         print(f"Actor assigned with shard of {len(dataset.episodes)} episodes.")
 
@@ -664,8 +672,8 @@ class LoggingHabitatWorker(HabitatWorker):
         # Use first step info for stable IDs (scene, episode)
         first_info = self.steps['info'][0] if self.steps['info'] else {}
         scene_id = first_info.get('scene_id', 'unknown_scene')
-        ep_label = first_info.get('episode_label', f"ep_{int(time.time())}")
-        
+        ep_label = first_info.get('episode_label', f"ep_unknown_{int(time.time())}")
+        ep_label = f"{ep_label}.{os.getpid()}@{time.time()}"
         # Create dedicated folder: /logs/scene_X/episode_label/
         # This keeps artifacts (video, thumb, json) grouped together
         save_dir = os.path.join(self.log_dir, scene_id, str(ep_label))
@@ -703,7 +711,7 @@ class LoggingHabitatWorker(HabitatWorker):
         with open(seq_path, 'w') as f:
             json.dump(sequence_logs, f, default=default_serializer)
 
-        with open(os.path.join(self.log_dir,"results"),'a') as f:
+        with open(os.path.join(self.log_dir,f"results_{os.getpid()}"),'a') as f:
             f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result
 
         # 5. Construct Global Payload (Paths + Scalars)

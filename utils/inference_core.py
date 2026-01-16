@@ -201,7 +201,8 @@ class RolloutWorker(VLMWorker, EpisodeRolloutMixin):
         # 1. Initialize the VLM Worker (The Heavy Lifter)
         # We pass only the relevant VLM args to avoid 'unexpected keyword argument' errors.
         VLMWorker.__init__(self, **vlm_kwargs)
-        
+        import os
+        np.random.seed(os.getpid())
         # 2. Initialize the Mixin State
         # Since the Mixin's __init__ was just setting this variable, we can do it here directly
         # effectively bypassing the need for cooperative inheritance in the parents.

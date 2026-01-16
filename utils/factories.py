@@ -9,6 +9,79 @@ from typing import List, Dict, Any, Iterator, Optional,Union
 import logging
 import json
 
+def save_hydra_config(config, save_dir: str, filename: str = "config.yaml"):
+    """
+    Saves a Hydra/OmegaConf object to a YAML file.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, filename)
+    OmegaConf.save(config=config, f=save_path)
+    print(f"📄 Config saved to: {save_path}")
+
+def load_hydra_config(load_dir: str, filename: str = "config.yaml"):
+    """
+    Loads a Hydra/OmegaConf object from a YAML file.
+    Returns None if file is missing.
+    """
+    load_path = os.path.join(load_dir, filename)
+    if not os.path.exists(load_path):
+        return None
+        
+    try:
+        conf = OmegaConf.load(load_path)
+        return conf
+    except Exception as e:
+        print(f"⚠️ Failed to load config from {load_path}: {e}")
+        return None
+
+def get_base_model(checkpoint):
+    config_path = os.path.join(checkpoint, "adapter_config.json")
+    saved_base = None
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            conf = json.load(f)
+            saved_base = conf.get("base_model_name_or_path", "")
+    return saved_base
+
+def resolve_checkpoint_path(path_or_id):
+    """
+    Detects if the input is a local path or a HuggingFace Hub ID.
+    If Hub ID, downloads the snapshot (adapters + optim states) and returns local cache path.
+    If local path, returns as-is.
+    """
+    import os
+    from huggingface_hub import snapshot_download, hf_hub_download
+    from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
+
+    # 1. If it exists locally, trust it.
+    if os.path.exists(path_or_id):
+        return path_or_id
+
+    # 2. Heuristic: Hub IDs usually look like 'user/repo'
+    # We attempt to download. If it fails, we assume it was a bad local path.
+    print(f"🔍 '{path_or_id}' not found locally. Attempting HF Hub download...")
+    
+    try:
+        # Download everything needed for a resume:
+        # - Adapter weights (.bin or .safetensors)
+        # - Configs (.json, .yaml)
+        # - Optimizer/Scheduler states (.pt) - ONLY if you uploaded them!
+        local_dir = snapshot_download(
+            repo_id=path_or_id,
+            allow_patterns=["*.json", "*.bin", "*.safetensors", "*.pt", "*.yaml"],
+            ignore_patterns=["*.msgpack", "*.h5"], # Ignore flax/tf weights if any
+            tqdm_class=None # Optional: silence progress bar
+        )
+        print(f"✅ Downloaded '{path_or_id}' to: {local_dir}")
+        return local_dir
+        
+    except (RepositoryNotFoundError, RevisionNotFoundError):
+        print(f"❌ Could not find '{path_or_id}' on HuggingFace Hub or locally.")
+        raise FileNotFoundError(f"Checkpoint path not found: {path_or_id}")
+    except Exception as e:
+        print(f"⚠️ Error during HF download: {e}")
+        raise e
+    
 class InferenceWorkerFactory:
     @staticmethod
     def create(vlm_dict: dict, rollout_dict: dict, res_cfg: ResourceConfig):
@@ -81,7 +154,7 @@ class SimWorkerFactory:
         handles = []
         for i in range(res_cfg.num_sims):
             # Calculate dynamic per-worker arguments
-            log_dir = os.path.join(task_cfg.output_dir, task_cfg.run_name, f'worker_{i}')
+            log_dir = os.path.join(task_cfg.output_dir, task_cfg.run_name,"rollout")# f'worker_{i}')
             
             # We merge the static sim_dict with our dynamic arguments
             h = RemoteSim.remote(
@@ -136,6 +209,7 @@ class ExpBootstrapper:
         else:
             ray.init(address=res.ray_address, ignore_reinit_error=True)
     def bootstrap_logger(self):
+        save_hydra_config(self.typed_cfg,os.path.join(self.typed_cfg.task.output_dir,self.typed_cfg.task.run_name))
         return WandbFactory.create(
             self.typed_cfg.task, 
             self.typed_cfg.resources, 
@@ -150,6 +224,13 @@ class ExpBootstrapper:
         )
     
     def bootstrap_vlms_rl(self):
+        if self.typed_cfg.training.checkpoint is not None:
+            checkpoint_path = self.typed_cfg.training.checkpoint
+            checkpoint_path = resolve_checkpoint_path(checkpoint_path)
+            base_model_path = get_base_model(checkpoint_path)
+            if base_model_path is not None:
+                self.resolved_dict['vlm']['model_id'] = base_model_path
+                self.typed_cfg.vlm.model_id = base_model_path
         workers = RLWorkerFactory.create(
             vlm_dict=self.resolved_dict['vlm'], 
             rollout_dict=self.resolved_dict['rollout'], 

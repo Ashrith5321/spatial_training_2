@@ -34,10 +34,14 @@ class VLMConfig:
 
 @dataclass 
 class RLConfig:
-    use_value: bool = True
+    # generic on policy params
+    use_value: bool = False
     value_grad_scale: float = 0.1
     advantage_estimator: str = "gae"
     policy_loss_name: str = "vanilla"
+    n_rollout: int = 12 # note: must be divisible by num vlms times gradient accumulation
+    n_adv: int = 256 # number of trajectories for advantage estimation, must > n_rollout
+    n_epoch: int = 2 # number of policy gradient epochs
 
     # PPO Hyperparameters
     clip_ratio: float = 0.2
@@ -94,12 +98,18 @@ class HydraLoraConfig:
 
 @dataclass
 class VLMTrainingConfig:
+    # checkpoints
+    checkpoint:Optional[str] = None
+    load_optim:bool = False # l
+    load_sched:bool = False
+
     # Optimization
     learning_rate: float = 5e-6
     grad_accum_steps: int = 1
     mixed_precision: Optional[str] = "no" #['no', 'fp8', 'fp16', 'bf16']
     gradient_checkpointing: bool = True
     total_optimization_steps: int = 100000 # used for linear LR schedule
+    save_step: Optional[int] = 100
 
     # Value Head Configuration
     value_head_learning_rate: float = 5e-4  # Often higher than Adapter LR
@@ -133,6 +143,8 @@ class HabitatConfig:
         "stuck": True,
         "fp_stop": True
     })
+    auto_flush: bool = True # automatically flush logs upon reset
+    ep_seed: Optional[bool] = None # if set, episode iterators are deterministic with same set seed all habitat workers
 
 # --- Rollouts (both for Eval and RL) ---
 @dataclass
