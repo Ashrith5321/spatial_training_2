@@ -1,9 +1,10 @@
 # @package _global_
 task:
   run_name: rpp_t_clipcov
-  wandb_project: rl_dev
+  wandb_project: rl_debug
   shard_size: 0
   jobtype: train
+  output_dir: /home/huyu/scratch/qixin/rl_training/dump/rl_training
 resources:
   ray_address: '10.164.33.175:6379'
   object_spilling_directory: /caches/ray_object_spilling
@@ -11,8 +12,8 @@ resources:
   sim_resource_tag: env_b
   master_addr: localhost
   master_port: null
-  num_vlms: 3
-  num_sims: 4
+  num_vlms: 4
+  num_sims: 5
   vlm_conda_env: null
   habitat_conda_env: null
   vlm_gpu_fraction: 0.7
@@ -88,7 +89,7 @@ training:
     use_value: false
     advantage_estimator: reinforce_plus_plus_geometric_time_aware
     policy_loss_name: clip_cov
-    n_rollout: 12
+    n_rollout: 16
     n_adv: 256
     n_epoch: 2
     clip_ratio: 0.2

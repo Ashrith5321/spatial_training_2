@@ -241,7 +241,7 @@ def main(cfg: RLConfig):
             steps_until_save = (global_cycle+1) % bootstrapper.typed_cfg.training.save_step
             if steps_until_save == 0:
                 print("saving checkpoint")
-                ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{i}")))
+                ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{global_cycle}")))
             else:
                 print(f"T-{steps_until_save} steps until checkpoint!")
     finally:
