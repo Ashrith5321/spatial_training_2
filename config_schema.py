@@ -9,7 +9,7 @@ class ResourceConfig:
     vlm_resource_tag: str = "env_a"
     sim_resource_tag: str = "env_b"
     master_addr: str = 'localhost'
-    master_port: int = 29400 #port for accelerate/ddp
+    master_port: Optional[int] = None #port for accelerate/ddp
     num_vlms: int = 1
     num_sims: int = 1
     vlm_conda_env: str = "vlm_node_1016"
@@ -32,6 +32,18 @@ class VLMConfig:
     use_sparse: bool = True
     save_outputs: bool = False # only need this for RL
 
+    # clip_cov_ratio = config.policy_loss.clip_cov_ratio if config.policy_loss.clip_cov_ratio is not None else 0.0002
+    # cliprange = config.clip_ratio
+    # cliprange_low = config.clip_ratio_low if config.clip_ratio_low is not None else cliprange
+    # cliprange_high = config.clip_ratio_high if config.clip_ratio_high is not None else cliprange
+    # clip_cov_ub = config.policy_loss.clip_cov_ub if config.policy_loss.clip_cov_ub is not None else 5.0
+    # clip_cov_lb = config.policy_loss.clip_cov_lb if config.policy_loss.clip_cov_lb is not None else 1.0
+@dataclass 
+class PolicyLossConfig:
+    clip_cov_ratio: Optional[float] = 0.0002
+    clip_cov_ub: Optional[float] = 5.0
+    clip_cov_lb: Optional[float] = 1.0
+    
 @dataclass 
 class RLConfig:
     # generic on policy params
@@ -49,6 +61,8 @@ class RLConfig:
     clip_ratio_high: Optional[float] = None
     clip_ratio_c: float = 3.0
     
+    # clip cov parameters
+    policy_loss:PolicyLossConfig = field(default_factory=PolicyLossConfig)
     # GAE Hyperparameters
     gamma: float = 0.99
     lam: float = 0.95
@@ -109,7 +123,7 @@ class VLMTrainingConfig:
     mixed_precision: Optional[str] = "no" #['no', 'fp8', 'fp16', 'bf16']
     gradient_checkpointing: bool = True
     total_optimization_steps: int = 100000 # used for linear LR schedule
-    save_step: Optional[int] = 100
+    save_step: Optional[int] = 10
 
     # Value Head Configuration
     value_head_learning_rate: float = 5e-4  # Often higher than Adapter LR
