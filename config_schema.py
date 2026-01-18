@@ -45,7 +45,7 @@ class PolicyLossConfig:
     clip_cov_lb: Optional[float] = 1.0
     
 @dataclass 
-class RLConfig:
+class RLAlgoConfig:
     # generic on policy params
     use_value: bool = False
     value_grad_scale: float = 0.1
@@ -66,7 +66,10 @@ class RLConfig:
     # GAE Hyperparameters
     gamma: float = 0.99
     lam: float = 0.95
-    
+
+    time_kernel_sigma: float = 5.0
+    distance_kernel_sigma: float = 1.2
+
     # Value & Entropy
     cliprange_value: float = 0.2
     entropy_bonus: float = 0.0
@@ -136,7 +139,7 @@ class VLMTrainingConfig:
     # Typed as Any to avoid crashing if peft isn't installed on the driver
     peft_config: Optional[Any] = field(default_factory=HydraLoraConfig) 
 
-    rl_config:Optional[RLConfig] = field(default_factory=RLConfig) # RL Algorithm 
+    rl_config:Optional[RLAlgoConfig] = field(default_factory=RLAlgoConfig) # RL Algorithm 
     sft_config:Optional[SFTConfig] = None
 
 # --- habitat sim configs ---
@@ -151,7 +154,7 @@ class HabitatConfig:
     voxel_kwargs: Optional[Dict[str, Any]] = field(default_factory=lambda: None)
     output_schema: Dict[str, Any] = field(default_factory=lambda: {
         "obs": {"rgb": True, "goal_name": True, "patch_coords": False},
-        "info": {"episode_label": True, "spl": True, "success": True},
+        "info": {"episode_label": True, "spl": True, "soft_spl":True, "success": True,"distance_to_goal":True},
         "done": True,
         "reward": True,
         "stuck": True,

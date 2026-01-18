@@ -242,7 +242,7 @@ class ExpBootstrapper:
             res_cfg=self.typed_cfg.resources
         )
     
-    def bootstrap_vlms_rl(self):
+    def bootstrap_vlms_rl(self,training=True):
         if self.typed_cfg.training.checkpoint is not None:
             checkpoint_path = self.typed_cfg.training.checkpoint
             checkpoint_path = resolve_checkpoint_path(checkpoint_path)
@@ -250,13 +250,16 @@ class ExpBootstrapper:
             if base_model_path is not None:
                 self.resolved_dict['vlm']['model_id'] = base_model_path
                 self.typed_cfg.vlm.model_id = base_model_path
+            # self.resolved_dict['training']['checkpoint'] = checkpoint_path
+            self.typed_cfg.training.checkpoint = checkpoint_path
         workers = RLWorkerFactory.create(
             vlm_dict=self.resolved_dict['vlm'], 
             rollout_dict=self.resolved_dict['rollout'], 
             res_cfg=self.typed_cfg.resources,
         )
-        futures = RLWorkerFactory._enable_training(workers,self.typed_cfg.resources,self.typed_cfg.training)
-        ray.get(futures)
+        if training:
+            futures = RLWorkerFactory._enable_training(workers,self.typed_cfg.resources,self.typed_cfg.training)
+            ray.get(futures)
         return workers
     
     def bootstrap_sims(self,logger=None):
@@ -307,7 +310,8 @@ def get_console_logger():
 def get_shard_iterator(
     shard_size: int, 
     subset_label: str = "", 
-    episode_json: str = "", logger: Optional[logging.Logger] = None
+    episode_json: str = "", logger: Optional[logging.Logger] = None,
+    excluded_episodes = None
 ) -> Iterator[Optional[List[str]]]:
     """
     Orchestrates shard creation based on config.
@@ -340,5 +344,7 @@ def get_shard_iterator(
 
     if not all_episodes:
         raise ValueError("The resolved episode list is empty.")
-
+    if excluded_episodes is not None:
+        excluded_episodes = set(excluded_episodes)
+        all_episodes = [episode for episode in all_episodes if episode not in excluded_episodes]
     return chunk_list(all_episodes, shard_size)

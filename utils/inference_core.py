@@ -93,9 +93,9 @@ class EpisodeRolloutMixin:
         if "probs" in stacked:
             stacked["action_probs"] = stacked["action_probs"].astype(np.float32)
         if "rewards" in stacked:
-             stacked["rewards"] = stacked["rewards"].astype(np.float32)
-            
+             stacked["rewards"] = stacked["rewards"].astype(np.float32)    
         return stacked
+    
     def run_episode(self,habitat_handle, initial_state_ref,collect_trajectory=False,compute_value=False):
         import time
         self.reset() #we reset at the start to ensure clean state. not resetting at the end preserves state for downstream.
@@ -123,6 +123,7 @@ class EpisodeRolloutMixin:
             # Trajectory Buffer (List is fine here!)
             trajectory_buffer = []
             goal_name = state_dict['obs']['goal_name']
+            episode_label = state_dict['info']['episode_label']
             while not done and step_count < self.rollout_config['max_steps']:
                 # A. Prepare VLM Input
                 rgb_numpy = rgb
@@ -163,7 +164,8 @@ class EpisodeRolloutMixin:
                         "rewards": state_dict.get("reward", 0.0),
                         "dones": state_dict['done'],
                         "spl": state_dict['info']['spl'],
-                        "success": state_dict['info']['success']
+                        "success": state_dict['info']['success'],
+                        "distance_to_goal": state_dict['info']['distance_to_goal']
                     }
                     if compute_value:
                         import torch
@@ -288,10 +290,12 @@ class RLRayWorker(RLWorker):
         habitat_handle,is_exhausted,state_dict,_,_,_ = super().run_episode(habitat_handle, initial_state_ref)
         return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
     
-    def postprocess_episode(self):
+    def postprocess_episode(self,return_inputs = True):
         trajectory,model_inputs = super().postprocess_episode()
-        inputs_tensors,inputs_metadata = TensorPacker.pack(model_inputs)
-        return trajectory,inputs_tensors,inputs_metadata
+        if return_inputs:
+            inputs_tensors,inputs_metadata = TensorPacker.pack(model_inputs)
+            return trajectory,inputs_tensors,inputs_metadata
+        else: return trajectory,
 
     def train_rl_step(self, embeds_inputs_np, embeds_inputs_meta,traj_batch):
         embeds_inputs = TensorPacker.unpack(embeds_inputs_np,embeds_inputs_meta,device=self.accelerator.device)
@@ -321,20 +325,12 @@ class HabitatRayWorker(LoggingHabitatWorker):
             state_dict: {'obs': ..., 'is_exhausted': ...}
         """
         # Base worker returns a single dict (typically just the observations for reset)
-        obs = super().reset()['obs']
+        state_dict = super().reset()
         
         # 1. Extract the heavy asset (modifies dict in place)
-        rgb = obs.pop("rgb")
-        
-        # 2. Package the lightweight state
-        # We wrap it in an 'obs' key to match the structure expected by the Mixin
-        state_dict = {
-            "obs": obs,
-            "is_exhausted": self.is_exhausted(),
-            # Optional: Add placeholders if your Mixin checks these on reset
-            "done": False, 
-            "info": {}
-        }
+        rgb = state_dict['obs'].pop("rgb")
+
+        state_dict['is_exhausted'] = self.is_exhausted()
         
         if self.voxel_kwargs is None:
             return rgb, state_dict

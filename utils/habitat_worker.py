@@ -232,6 +232,9 @@ def habitat_logging_helper(episode_data):
     sequence_logs['positions'] = [info['pos_rots'][:3] for info in episode_data['info'][:-1]] #final position is redundant due to stop action
     sequence_logs['quaterions'] = [info['pos_rots'][3:] for info in episode_data['info'][:-1]] #doubt this is meaningful in wandb but it can't cost that much storage right?
     sequence_logs['collision_events'] = raw_collisions
+    copy_keys = ['reward','fp_stop','fn_stop']
+    for k in copy_keys:
+        sequence_logs[k] = episode_data[k]
 
     return episode_logs, sequence_logs
 
@@ -682,7 +685,7 @@ class LoggingHabitatWorker(HabitatWorker):
         # 2. Calculate Metrics & Split Data
         # Returns scalars (episode_logs) and raw lists (sequence_logs)
         episode_logs, sequence_logs = habitat_logging_helper(self.steps)
-
+    
         # 3. Generate & Save Video + Thumbnail
         # Uses your helper. Returns (video_path_string, PIL_Image)
         vid_path, thumb_img = save_run_video(
@@ -696,11 +699,20 @@ class LoggingHabitatWorker(HabitatWorker):
         # Manually save the thumbnail object to disk
         thumb_path = os.path.join(save_dir, "thumbnail.jpg")
         Image.fromarray(thumb_img).save(thumb_path, quality=85)
+        seq_path = os.path.join(save_dir, "sequence.json")
+        ep_path = os.path.join(save_dir,"summary.json")
 
+        episode_logs["vid/episode_video"] = vid_path  # Path for WandB Video
+        episode_logs["raw/trace"] =  seq_path          # Path for WandB Artifact/File
+        episode_logs["img/thumbnail"] = thumb_path    # Path for WandB Image
+       
+        episode_logs |= {
+             "worker_pid": os.getpid(),
+            "node": os.uname().nodename,
+            "timestamp": time.time()
+        }
         # 4. Save Raw Sequence Data (The "Raw Data" Fix)
         # Dump trajectory/actions to JSON so we don't lose granular history
-        seq_path = os.path.join(save_dir, "trace.json")
-        
         # Convert numpy types to native python for JSON serialization
         def default_serializer(obj):
             if isinstance(obj, np.integer): return int(obj)
@@ -714,18 +726,14 @@ class LoggingHabitatWorker(HabitatWorker):
         with open(os.path.join(self.log_dir,f"results_{os.getpid()}"),'a') as f:
             f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result
 
+        with open(ep_path, 'w') as f:
+            json.dump(episode_logs, f, default=default_serializer,indent=4) # append to cumulative logs
+            # f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result
+
         # 5. Construct Global Payload (Paths + Scalars)
         # Merge the scalar metrics with the file paths
         payload = {
-            **episode_logs,
-            "vid/episode_video": vid_path,  # Path for WandB Video
-            "img/thumbnail": thumb_path,    # Path for WandB Image
-            "raw/trace": seq_path,          # Path for WandB Artifact/File
-            
-            # System Metadata
-            "worker_pid": os.getpid(),
-            "node": os.uname().nodename,
-            "timestamp": time.time()
+            **episode_logs,           
         }
         if clear_steps:
             self.steps = defaultdict(list)  # Clear video cache for new episode
@@ -733,6 +741,7 @@ class LoggingHabitatWorker(HabitatWorker):
         # 6. Send to Global Logger
         if self.logger_actor:
             self.logger_actor.log_row.remote(row=payload)
+        return ep_path
 
     def reset(self, episode_id=None,output_schema=None,logging_schema=None):
         if len(self.steps['action'])>0 and self.auto_flush:
@@ -740,7 +749,7 @@ class LoggingHabitatWorker(HabitatWorker):
         return super().reset(episode_id,output_schema,logging_schema)
 
     def assign_shard(self, assigned_episode_labels=None):
-        if len(self.steps['action'])>0 and self.auto_flushs:
+        if len(self.steps['action'])>0 and self.auto_flush:
             self._flush_logs_to_disk()
         return super().assign_shard(assigned_episode_labels)
     

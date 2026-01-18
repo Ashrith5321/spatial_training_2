@@ -1,0 +1,16 @@
+# @package _global_
+task:
+  output_dir: ./dump/rl_training
+resources:
+  ray_address: 'local'
+  object_spilling_directory: ./ray_object_spilling
+  vlm_resource_tag: env_a
+  sim_resource_tag: env_b
+  master_addr: localhost
+  master_port: null
+  vlm_conda_env: vlm_node_1016
+  habitat_conda_env: vln
+sim:
+  workspace: /Projects/SG_VLN_HumanData/SG-VLN
+  split: train_mini #goldeen doesn't have the full train split somehow
+

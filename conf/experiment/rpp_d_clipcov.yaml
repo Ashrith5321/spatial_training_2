@@ -1,0 +1,103 @@
+# @package _global_
+task:
+  run_name: rpp_d_clipcov
+  wandb_project: rl_dev
+  shard_size: 0
+  jobtype: train
+resources:
+  vlm_resource_tag: env_a
+  sim_resource_tag: env_b
+  num_vlms: 2
+  num_sims: 3
+  vlm_gpu_fraction: 0.7
+  sim_gpu_fraction: 0.14
+  vlm_cpus: 4
+  sim_cpus: 4
+rollout:
+  max_steps: 350
+  temperature: 1.0
+  action_space_str: '[stop, forward, left, right, up, down]'
+  system_prompt: ${read_text:conf/prompts/objectnav_prompt.txt}
+  action_space:
+  - stop
+  - forward
+  - left
+  - right
+vlm:
+  model_id: Phyllis1/qwen3_sft_sft_sparse_03drop_single_action_20260103_210803_ckpt10800
+  attn_impl: flash_attention_2
+  dtype: bfloat16
+  offload_cache: false
+  use_sparse: true
+  save_outputs: true
+sim:
+  config_path: configs/objectnav_hm3d_rgbd_semantic.yaml
+  scenes_dir: null
+  fp_guard: false
+  fn_guard: false
+  voxel_kwargs: null
+  output_schema:
+    obs:
+      rgb: true
+      goal_name: true
+      patch_coords: false
+    info:
+      episode_label: true
+      spl: true
+      success: true
+    done: true
+    reward: true
+    stuck: true
+    fp_stop: true
+  auto_flush: true
+  ep_seed: null
+training:
+  checkpoint: Aasdfip/rpp_t_clipcov_llr_new-checkpoint_191
+  load_optim: false
+  load_sched: false
+  learning_rate: 1.5e-06
+  grad_accum_steps: 1
+  mixed_precision: 'no'
+  gradient_checkpointing: true
+  total_optimization_steps: 20000
+  save_step: 8
+  peft_config:
+    r: 128
+    lora_alpha: 256
+    lora_dropout: 0.0
+    bias: none
+    task_type: CAUSAL_LM
+    target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+    modules_to_save: null
+  rl_config:
+    use_value: false
+    advantage_estimator: reinforce_plus_plus_distance_kernel
+
+    policy_loss_name: clip_cov
+    n_rollout: 12
+    n_adv: 256
+    n_epoch: 2
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    clip_ratio_c: 3.0
+    policy_loss:
+      clip_cov_ratio: 0.0002
+      clip_cov_ub: 5.0
+      clip_cov_lb: 1.0
+    gamma: 0.99
+    lam: 0.95
+    cliprange_value: 0.2
+    entropy_bonus: 0.001
+    use_ref: true
+    kl_coeff: 0.001
+    kl_target: 0.1
+    global_batch_info: {}
+  sft_config: null

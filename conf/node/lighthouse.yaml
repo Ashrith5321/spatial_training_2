@@ -1,0 +1,16 @@
+# @package _global_
+task:
+  output_dir: /home/huyu/scratch/qixin/rl_training/dump/rl_training # full path for safety
+resources:
+  ray_address: '10.164.33.175:6379' # external ray head node
+  object_spilling_directory: /caches/ray_object_spilling # bind mounted cache
+  vlm_resource_tag: env_a
+  sim_resource_tag: env_b
+  master_addr: localhost
+  master_port: null
+  vlm_conda_env: null # we start conda with bash script external in lighthouse
+  habitat_conda_env: null
+sim:
+  workspace: /Projects/SG_VLN_HumanData/SG-VLN
+  split: train 
+

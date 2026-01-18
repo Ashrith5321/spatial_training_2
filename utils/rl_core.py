@@ -7,6 +7,7 @@ from collections import deque
 from typing import Iterator,Optional
 import ray
 import verl.utils.torch_functional as verl_F
+import torch.nn.functional as F
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo.core_algos import register_adv_est
 
@@ -74,18 +75,17 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
     batch['response_mask'] = response_mask
     return TensorDict(batch,batch_size=batch['old_log_prob'].shape[:2])
 
-
-
 def collect_rollouts(
     sim_handles: list,
     vlm_handles: list,
     shard_iterator: Iterator[list[str]],
-    target_episodes: int = float('inf')
-) -> list:
+    target_episodes: int = float('inf'),
+    postprocess_kwargs = {"return_inputs":True}
+) -> tuple[list,list,list]:
     """
     Orchestrates the RL collection pipeline.
-    Structurally identical to run_inference_driver, except VLM recycling 
-    is delayed until post-processing completes.
+
+    returns: trajectory buffer, result list, log list, indexed by dispatch_id
     """
 
     # --- 1. Initialize Pools ---
@@ -94,12 +94,18 @@ def collect_rollouts(
 
     # --- 2. Tracking Futures ---
     pending_resets = {}   # reset_ref -> sim_handle
-    active_episodes = {}  # sup_ref -> "running"
+    active_episodes = {}  # ep_ref -> dispatch_id
     
-    # [DIFFERENCE]: New state for VLM post-processing
-    pending_postproc = {} # pp_ref -> vlm_handle 
+    # VLM post-processing
+    pending_postproc = {} # pp_ref -> vlm_handle, dispatch_id 
+    # Sim logging
+    pending_logs = {} # log_ref -> sim_handle, dispatch_id
 
     trajectory_buffer = []
+    trajectory_ids = []
+
+    result_dict = {}
+    log_dict = {}
     iterator_exhausted = False
 
     # --- 3. Bootstrap: Initial Sharding & Resets (IDENTICAL) ---
@@ -120,15 +126,13 @@ def collect_rollouts(
     # Helper to check if we should keep the loop alive
     def has_work():
         # 1. Are tasks currently running?
-        is_active = len(active_episodes) > 0 or len(pending_resets) > 0 or len(pending_postproc) > 0
-        
-        # 2. Can we launch new tasks? (Resources available AND Target not met)
+        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0
+        # 2. Do we still want to launch new tasks (now or in the future)? (Resources available AND Target not met)
         potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
-        can_launch = (len(idle_vlms) > 0 and len(ready_sims) > 0)
-        should_launch = can_launch and (potential < target_episodes) and (not iterator_exhausted)
-        
-        return is_active or should_launch
-
+        want_launch = (potential < target_episodes) and (not iterator_exhausted) 
+        return is_active or want_launch
+    
+    dispatch_counter = 0
     # --- Event Loop ---
     while has_work():
         
@@ -138,16 +142,17 @@ def collect_rollouts(
         while (idle_vlms and ready_sims and total_potential < target_episodes):
             vlm = idle_vlms.popleft()
             sim, init_state_ref = ready_sims.popleft()
-            
-            sup_ref = vlm.run_episode.remote(sim, init_state_ref)
-            active_episodes[sup_ref] = "running"
+            ep_ref = vlm.run_episode.remote(sim, init_state_ref)
+            active_episodes[ep_ref] = dispatch_counter
+            dispatch_counter +=1
             total_potential +=1
 
 
         # B. Wait for Events
         all_watch_refs = list(pending_resets.keys()) + \
                          list(active_episodes.keys()) + \
-                         list(pending_postproc.keys()) # Added check
+                         list(pending_postproc.keys()) + \
+                         list(pending_logs.keys())
         
         if not all_watch_refs:
             break
@@ -156,49 +161,54 @@ def collect_rollouts(
         
         for ref in ready_refs:
             
-            # --- CASE 1: Reset Finished (IDENTICAL) ---
+            # --- CASE 1: Reset Finished ---
             if ref in pending_resets:
                 sim_handle = pending_resets.pop(ref)
                 ready_sims.append((sim_handle, ref))
             
-            # --- CASE 2: Episode Finished (MODIFIED) ---
+            # --- CASE 2: Episode Finished ---
             elif ref in active_episodes:
-                del active_episodes[ref]
-                
+                dispatch_id =  active_episodes.pop(ref)
                 # Unpack results
-                vlm, hab, is_exhausted, state = ray.get(ref)
-                
-                # [DIFFERENCE]: VLM does NOT go to idle_vlms yet.
-                # It goes to post-processing.
-                pp_ref = vlm.postprocess_episode.remote()
-                pending_postproc[pp_ref] = vlm
+                vlm, sim, is_exhausted, state = ray.get(ref)
+                result_dict[dispatch_id] = state
 
-                # Sim Logic: [IDENTICAL to Inference]
+                # send vlm and sim to post episode processing
+                pp_ref = vlm.postprocess_episode.remote(**postprocess_kwargs)
+                pending_postproc[pp_ref] = vlm,dispatch_id
+
+                log_ref = sim._flush_logs_to_disk.remote()
+                pending_logs[log_ref] = sim,dispatch_id,is_exhausted                
+            
+            # --- CASE 3: VLM Post-Processing Finished ---
+            elif ref in pending_postproc:
+                vlm,dispatch_id = pending_postproc.pop(ref)    
+                trajectory_buffer.append(ref)
+                trajectory_ids.append(dispatch_id)
+                idle_vlms.append(vlm)
+                print(f"Collected episode {len(trajectory_buffer)}")
+
+            # --- CASE 4: Sim Log Flush Finished
+            elif ref in pending_logs:
+                sim,dispatch_id,is_exhausted = pending_logs.pop(ref)
+                log_dict[dispatch_id] = ref # save the path to the log
+                # send the sim to reset/reshard so it can start working again asap
                 try:
                     if is_exhausted:
                         new_shard = next(shard_iterator)
-                        hab.assign_shard.remote(new_shard)
-                    
-                    new_reset_ref = hab.reset.remote()
-                    pending_resets[new_reset_ref] = hab
+                        sim.assign_shard.remote(new_shard)
+                    new_reset_ref = sim.reset.remote()
+                    pending_resets[new_reset_ref] = sim
                 except StopIteration:
                     # No more work. Retire the Habitat worker.
                     iterator_exhausted = True
-                    ray.get(hab._flush_logs_to_disk.remote()) 
                     pass
-            
-            # --- CASE 3: Post-Processing Finished (NEW) ---
-            elif ref in pending_postproc:
-                vlm = pending_postproc.pop(ref)
-                
-                # Get the packed trajectory data
-                traj_tuple = ray.get(ref)
-                trajectory_buffer.append(traj_tuple)
-                
-                # [DIFFERENCE]: NOW the VLM is recycled
-                idle_vlms.append(vlm)
-                print(f"Collected episode {len(trajectory_buffer)}")
-    return trajectory_buffer
+    rollouts = [t for _, t in sorted(zip(trajectory_ids, trajectory_buffer))]
+    log_dict |={v[1]:k for k,v in pending_logs.items()}
+    num_rollouts = len(rollouts)
+    result_list = [result_dict[i] for i in range(num_rollouts)]
+    log_list = [log_dict[i] for i in range(num_rollouts)]
+    return ray.get(rollouts), result_list, log_list
 
 @register_adv_est("reinforce_plus_plus_linear_time_aware")
 def compute_reinforce_plus_plus_linear_time_aware_advantage(
@@ -360,119 +370,126 @@ def compute_reinforce_plus_plus_geometric_time_aware_advantage(
 
     return advantages, returns
 
-def _solve_linear_regression(x: torch.Tensor, y: torch.Tensor) -> tuple[float, float]:
-    """
-    Solves y = mx + c using Closed-Form Least Squares.
-    Expects x, y to be flat 1D tensors of shape (N,).
-    Returns (m, c). Returns (0.0, 0.0) if N < 2.
-    """
-    N = x.numel()
-    if N < 2:
-        return 0.0, 0.0
+def _generate_gaussian_kernel_1d(sigma: float, kernel_size: int, device: torch.device) -> torch.Tensor:
+    """Generates a 1D Gaussian kernel for convolution."""
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    x = torch.arange(kernel_size, device=device) - (kernel_size - 1) / 2
+    kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+    return (kernel / kernel.sum()).view(1, 1, -1)
 
-    sum_x = x.sum()
-    sum_y = y.sum()
-    sum_xy = (x * y).sum()
-    sum_xx = (x * x).sum()
-
-    # Denominator: N * Var(x)
-    denominator = N * sum_xx - sum_x * sum_x + 1e-6
-    
-    m = (N * sum_xy - sum_x * sum_y) / denominator
-    c = (sum_y - m * sum_x) / N
-    
-    return m, c
-
-def _fit_robust_baseline(
-    x_flat: torch.Tensor, 
-    y_flat: torch.Tensor, 
-    sigma_threshold: float = 3.0
-) -> tuple[float, float]:
-    """
-    Performs a Two-Pass Robust Regression to reject outliers.
-    """
-    # Pass 1: Initial Fit
-    m, c = _solve_linear_regression(x_flat, y_flat)
-    
-    # If not enough data, return early
-    if x_flat.numel() < 10: 
-        return m, c
-
-    # Pass 2: Outlier Rejection
-    preds = m * x_flat + c
-    residuals = torch.abs(y_flat - preds)
-    std_res = residuals.std()
-    
-    # Filter: Keep points within sigma_threshold (e.g., 3.0)
-    # 1e-6 prevents filtering if variance is zero
-    clean_mask = residuals < (sigma_threshold * std_res + 1e-6)
-    
-    # Only refit if we have a healthy subset left (>50% data)
-    if clean_mask.sum() > (x_flat.numel() // 2):
-        return _solve_linear_regression(x_flat[clean_mask], y_flat[clean_mask])
-    
-    return m, c
-
-@register_adv_est("reinforce_plus_plus_geometric_robust")
-def compute_reinforce_plus_plus_geometric_robust_advantage(
+@register_adv_est("reinforce_plus_plus_distance_kernel")
+def compute_reinforce_plus_plus_distance_kernel_advantage(
     token_level_rewards: torch.Tensor, 
     response_mask: torch.Tensor, 
     config: Optional[AlgoConfig] = None, 
     **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute REINFORCE++ advantages using a Linear Time-Decay Baseline.
-    Fixes applied:
-    1. Numerical Stability: Regressions calculated in float32 to prevent cancellation.
-    2. End-Alignment: Uses negative time (t - seq_len) to align goal states.
+    Computes REINFORCE++ advantages using a Distance-Based Kernel Baseline.
+    
+    This acts as a non-parametric critic: V(s) ~= E[Return | Distance_to_Goal].
+    It solves "Consumption Bias" by comparing efficient agents (low dist, low return)
+    only against other agents with similar remaining work.
+    
+    Requires 'distances' tensor in kwargs (shape: [Batch, Seq]).
     """
     assert config is not None
+    # Check for required distance feature
+    distances = kwargs.get('distances')
+    if distances is None:
+        # Fallback to info if packed differently, or raise error
+        if 'info' in kwargs and 'distance_to_goal' in kwargs['info']:
+             distances = kwargs['info']['distance_to_goal']
+        else:
+             raise ValueError("Advantage estimator 'distance_kernel' requires 'distances' or 'info['distance_to_goal']' in kwargs.")
+
     gamma = config.gamma
     device = token_level_rewards.device
+    bs, seq_len = token_level_rewards.shape
     
-    # 1. Compute Standard Discounted Returns (G_t)
     with torch.no_grad():
+        # 1. Standard Discounted Return Calculation (G_t)
         returns = torch.zeros_like(token_level_rewards)
         running_return = 0
 
-        for t in reversed(range(token_level_rewards.shape[1])):
+        for t in reversed(range(seq_len)):
             running_return = token_level_rewards[:, t] + gamma * running_return
             returns[:, t] = running_return
             running_return = running_return * response_mask[:, t]
 
-        # 2. Prepare Data for Linear Regression
-        bs, seq_len = returns.shape
-        seq_lengths = response_mask.sum(dim=-1)
-
-        # Create time indices. IMPORTANT: Use float32 for the grid to avoid casting later
-        time_indices = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0).expand(bs, seq_len)
-        # Calculate Discounted Horizon Basis: S(h) = (1 - gamma^h) / (1 - gamma)
-        # Horizon (Time-to-Go) = Total Length - Current Time Step
-        horizon = seq_lengths.unsqueeze(1) - time_indices
-        # Transform input feature to match the geometric shape of discounted returns
-        # This ensures the regression fits the "Curve" of returns, not just a Line.
-        if abs(1.0 - gamma) < 1e-6:
-            time_indices = horizon
-        else:
-            time_indices = (1.0 - torch.pow(gamma, horizon)) / (1.0 - gamma)
-
-        # Flatten and Mask
-        valid_mask = response_mask.bool()
+        # ---------------------------------------------------------------------
+        # 2. Distance-Based Kernel Regression (via Efficient Binning)
+        # ---------------------------------------------------------------------
         
-        # NUMERICAL STABILITY FIX: Ensure inputs to regression are float32
-        x_flat = time_indices[valid_mask].to(torch.float32) 
-        y_flat = returns[valid_mask].to(torch.float32)
+        # A. Configuration
+        # Resolution: 0.1 means 10cm buckets. 
+        # Sigma: 0.5 means the kernel spreads influence over +/- 1.5m roughly (3 sigma).
+        bin_resolution = 0.1 
+        kernel_sigma_meters = 0.5
+        if config.distance_kernel_sigma is not None:
+            kernel_sigma_meters = config.distance_kernel_sigma 
         
-        m, c = _fit_robust_baseline(x_flat, y_flat, sigma_threshold=3.0)
-            # 4. Compute Baseline 
-            # Cast back to original dtype for subtraction if needed, or keep as float32 for precision
-        baseline = m * time_indices + c
-            # The Advantage is the Residual (Actual - Predicted)
-            # We cast baseline to the return's dtype (e.g., bfloat16) to match
+        # Convert sigma from meters to bins
+        sigma_bins = kernel_sigma_meters / bin_resolution
+        kernel_size = int(8 * sigma_bins) + 1 # 8 sigma coverage
+        
+        # B. Discretize Distances
+        # We handle the dynamic range of the batch automatically.
+        # Apply mask: we don't want to bin padding (usually dist=0 or inf)
+        valid_distances = distances * response_mask
+        max_dist = valid_distances.max()
+        
+        # Create indices
+        dist_indices = (valid_distances / bin_resolution).long()
+        num_bins = int(max_dist / bin_resolution) + 1 + (kernel_size // 2) # Add padding room
+        
+        # C. Scatter to Bins (Aggregating Returns by Distance)
+        # We need flattened views for scatter_add
+        flat_indices = dist_indices.view(-1)
+        flat_returns = (returns * response_mask).view(-1)
+        flat_counts = response_mask.view(-1) # 1.0 for valid, 0.0 for pad
+        
+        # Accumulators
+        bin_sum = torch.zeros(num_bins, device=device, dtype=torch.float32)
+        bin_count = torch.zeros(num_bins, device=device, dtype=torch.float32)
+        
+        bin_sum.scatter_add_(0, flat_indices, flat_returns.float())
+        bin_count.scatter_add_(0, flat_indices, flat_counts.float())
+        
+        # D. Kernel Smoothing (1D Convolution over Distance)
+        # View as (1, 1, Length) for conv1d
+        input_sum = bin_sum.view(1, 1, -1)
+        input_count = bin_count.view(1, 1, -1)
+        
+        kernel = _generate_gaussian_kernel_1d(sigma_bins, kernel_size, device)
+        pad = kernel_size // 2
+        
+        # Use replicate padding to handle boundaries (0m and Max Distance) gracefully
+        padded_sum = F.pad(input_sum, (pad, pad), mode='replicate')
+        padded_count = F.pad(input_count, (pad, pad), mode='replicate')
+        
+        smoothed_sum = F.conv1d(padded_sum, kernel)
+        smoothed_count = F.conv1d(padded_count, kernel)
+        
+        # E. Compute Baseline Table
+        # Baseline[bin] = Avg Return for that distance
+        baseline_table = smoothed_sum / (smoothed_count + 1e-8) # (1, 1, num_bins)
+        baseline_table = baseline_table.view(-1) # (num_bins,)
+        
+        # F. Project back to Token Space (Gather)
+        # Map bin values back to original token positions
+        baseline_flat = baseline_table[flat_indices]
+        baseline = baseline_flat.view(bs, seq_len)
+        
+        # 3. Compute Advantage
+        # A = G_t - b(dist_t)
         advantages = returns - baseline.to(returns.dtype)
-       
-        # 5. Whiten the Residuals (Standardize variance)
+        
+        # ---------------------------------------------------------------------
+        # 4. Global Normalization (REINFORCE++ Standard)
+        # ---------------------------------------------------------------------
         advantages = verl_F.masked_whiten(advantages, response_mask)
         advantages = advantages * response_mask
 
-    return advantages, returns
+    return advantages, returns, baseline_table
