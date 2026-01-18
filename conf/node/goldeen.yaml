@@ -12,5 +12,4 @@ resources:
   habitat_conda_env: vln
 sim:
   workspace: /Projects/SG_VLN_HumanData/SG-VLN
-  split: train_mini #goldeen doesn't have the full train split somehow
 

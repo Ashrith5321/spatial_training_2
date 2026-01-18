@@ -1,7 +1,7 @@
 # @package _global_
 task:
-  run_name: rpp_t_clipcov
-  wandb_project: rl_debug
+  run_name: rpp_t_clipcov_llr_new
+  wandb_project: rl_dev
   shard_size: 0
   jobtype: train
   output_dir: /home/huyu/scratch/qixin/rl_training/dump/rl_training
@@ -64,8 +64,8 @@ training:
   checkpoint: null
   load_optim: false
   load_sched: false
-  learning_rate: 2.0e-05
-  grad_accum_steps: 2
+  learning_rate: 2.0e-06
+  grad_accum_steps: 1
   mixed_precision: 'no'
   gradient_checkpointing: true
   total_optimization_steps: 20000
@@ -93,17 +93,17 @@ training:
     n_adv: 256
     n_epoch: 2
     clip_ratio: 0.2
-    clip_ratio_low: null
-    clip_ratio_high: null
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
     clip_ratio_c: 3.0
     policy_loss:
       clip_cov_ratio: 0.0002
       clip_cov_ub: 5.0
       clip_cov_lb: 1.0
-    gamma: 0.97
+    gamma: 0.95
     lam: 0.95
     cliprange_value: 0.2
-    entropy_bonus: 0.0
+    entropy_bonus: 0.003
     use_ref: true
     kl_coeff: 0.001
     kl_target: 0.1
