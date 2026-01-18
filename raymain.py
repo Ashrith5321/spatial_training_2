@@ -104,7 +104,7 @@ try:
         image_obj = Image.fromarray(rgb_numpy)
 
         system_prompt = textwrap.dedent(f"""\
-        You are a visual navigation agent tasked with finding "{curr_state['obs']['goal_name']}" in an unknown environment.
+        You are a visual navigation agent tasked with finding "$goal_text" in an unknown environment.
         You will receive a sequence of observations showing your movement history up to the current moment.
 
         **Action Space:**

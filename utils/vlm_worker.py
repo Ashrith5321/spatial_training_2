@@ -4,10 +4,11 @@ import torch
 import time
 import gc
 import copy
+from utils.bev_utils import *
 # from transformers.models.qwen3_vl.modeling_qwen3_vl import rotate_half
 
 class VLMWorker:
-    def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_implementation='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],cache_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000):
+    def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_implementation='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],cache_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,debug_with_humanaction=False):
         import transformers.modeling_flash_attention_utils as fa_utils
         def patched(position_ids, batch_size):
             return False
@@ -27,6 +28,7 @@ class VLMWorker:
         self.offload_cache = offload_cache
         self.use_sparse = use_sparse
         self.bev_canvas_size = bev_canvas_size
+        self.debug_with_humanaction = debug_with_humanaction
         # Warmup the CUDA allocator
         if load_model:
             self.load_model()
@@ -196,13 +198,14 @@ class VLMWorker:
             self._accumulate_custom_inputs({'patch_coords':torch.tensor(pos_id_kwargs['patch_coords']).unsqueeze(0)},dim=0) 
             patch_coords = self.cumulative_inputs['patch_coords'] # N_image by H by W by 3
             patch_coords = patch_coords-torch.amin(patch_coords[:1],dim=[1,2],keepdim=True) 
+            # patch_coords = patch_coords-self.global_min_vals
             w,t,h = patch_coords[...,0],patch_coords[...,1],patch_coords[...,2] # horrific mess here
             w = w.reshape(-1)
             t = t.reshape(-1)
             h = h.reshape(-1)
 
             patch_coords = torch.stack([t,t+h,t+w],dim=0).reshape(1,3,-1)
-            patch_coords = self.bev_canvas_size//2*torch.ones(1,3,1)
+            # patch_coords = self.bev_canvas_size//2*torch.ones(1,3,1)
             position_ids = get_pos_id(self.cumulative_inputs['input_ids'],patch_coords.to(self.cumulative_inputs['input_ids'].dtype),self.processor,self.bev_canvas_size)
         return position_ids
 
@@ -248,7 +251,12 @@ class VLMWorker:
                 self.output_list.append(outputs)
                 # Compute logprobs directly (1-to-1 mapping)
             relevant_logits = outputs.logits[0].float()
-            all_logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
+            scaled_logits = relevant_logits/temperature
+            mask = torch.full_like(scaled_logits, float('-inf'))
+            mask[:, self.vocab_ids] = 0
+            masked_logits = scaled_logits + mask
+            all_probs = torch.softmax(masked_logits, dim=-1)
+            # all_logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
             if self.use_sparse:
                 current_keep_mask = self.model.model.language_model.seq_keep_mask
                 if self.seq_keep_mask is None:
@@ -262,21 +270,58 @@ class VLMWorker:
                         self.past_image_embeds[idx] = torch.cat((self.past_image_embeds[idx],image_embeds)) #handle the batching...
         if check_probs:
             try:
-                assert(torch.argmax(all_logprobs,dim=-1).item() in self.vocab_ids)
+                assert(torch.argmax(all_probs,dim=-1).item() in self.vocab_ids)
             except:
                 print("WARNING: prediction not in provided vocab")
         # print("inference done!")
         if full_logprobs:
+            return all_probs.cpu().float().numpy()
+        else:
+            return all_probs[:,self.vocab_ids].cpu().float().numpy()
+
+    def infer_sequence(self,messages,images,example,full_logprobs=False,temperature=1.2,pos_id_kwargs=None):
+        if self.model is None:
+            self.load_model()
+            self.reset()
+        with torch.no_grad():
+            seq_inputs = self.tokenize_inputs(messages, images).to(self.device)
+            seq_inputs['input_ids'] = seq_inputs['input_ids'][:,:-2]
+            seq_inputs['attention_mask'] = seq_inputs['attention_mask'][:,:-2]
+
+            seq_position_ids = self._calculate_seq_pos_id(seq_inputs, example, pos_id_kwargs)
+            if pos_id_kwargs is not None and pos_id_kwargs['mode'] == "bev":
+                seq_inputs['position_ids'] = seq_position_ids.to(self.device)
+            
+            seq_image_embeds = self.model.get_image_features(seq_inputs['pixel_values'], seq_inputs['image_grid_thw'])
+            seq_outputs = self.model.forward(**seq_inputs, use_cache=True, save_image_db=True)
+            # seq_filtered_embeds = self.model.model.language_model.kept_visual_embeds
+            seq_cache = seq_outputs['past_key_values']
+            relevant_logits = seq_outputs.logits[0].float()
+            all_logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
+            self.seq_outputs = seq_outputs
+            self.seq_inputs = seq_inputs
+            self.seq_position_ids = seq_position_ids
+        if full_logprobs:
             return all_logprobs.cpu().float().numpy()
         else:
             return all_logprobs[:,self.vocab_ids].cpu().float().numpy()
+    
+    def compare_with_seq(self):
+        input_id_diff = (self.cumulative_inputs['input_ids'] - self.seq_inputs['input_ids'].cpu()).abs().sum()
+        position_ids_diff = (self.cumulative_inputs['position_ids'] - self.seq_position_ids.cpu()).abs().sum()
+        attention_mask_diff = (self.cumulative_inputs['attention_mask'] - self.seq_inputs['attention_mask'].cpu()).abs().sum()
+        print('input_id: ', self.cumulative_inputs['input_ids'].shape, self.seq_inputs['input_ids'].shape, input_id_diff)
+        print('position_ids: ', self.cumulative_inputs['position_ids'].shape, self.seq_position_ids.shape, position_ids_diff)
+        print('attention_mask: ', self.cumulative_inputs['attention_mask'].shape, self.seq_inputs['attention_mask'].shape, attention_mask_diff)
+        return
 
     def infer_probs(self,messages,images,**kwargs):
-        logprobs = self.infer_step(messages,images,**kwargs)
-        assert(len(logprobs)==1) #ensure there is a unique token position for decision making
-        logprobs = logprobs[0]
-        probs = np.exp(logprobs)
-        probs /= np.sum(probs)
+        # logprobs = self.infer_step(messages,images,**kwargs)
+        # assert(len(logprobs)==1) #ensure there is a unique token position for decision making
+        # logprobs = logprobs[0]
+        # probs = np.exp(logprobs)
+        # probs /= np.sum(probs)
+        probs = self.infer_step(messages,images,**kwargs)[0]
         return probs
     
 if __name__ == "__main__":

@@ -362,3 +362,47 @@ def get_patch_coords(pos_rots,depths,patch_size=32,resolution=0.15,fov_degrees=7
     patch_coords_world = transform_points_batch(patch_coords,mats)
     patch_coords_discrete = np.round(patch_coords_world/resolution).astype(int) #TODO: need to round to closest grid. 
     return patch_coords_discrete
+
+def get_thw_np(patch_coords_discrete, min_vals=None):
+    if min_vals is None:
+        min_vals = patch_coords_discrete[0].view(-1, 3).min(dim=0).values
+    flat_coords = patch_coords_discrete.reshape(-1, 3)
+    # Find global mins to shift origin to (0,0,0)
+    # Note: We compute min across the entire set to maintain relative structure
+    # min_vals = flat_coords.min(dim=0).values # (x_min, y_min, z_min)
+    norm_coords = flat_coords - min_vals
+
+    x_col = norm_coords[:, 0]
+    y_col = norm_coords[:, 1]
+    z_col = norm_coords[:, 2]
+    
+    # Qwen expects position_ids shape: [3, Batch, Seq_Len]
+    # Dimension 0 is (Temporal, Height, Width)
+    t_vals = y_col
+    h_vals = z_col
+    w_vals = x_col
+    
+    mapped_coords = np.stack([t_vals, h_vals+t_vals, w_vals+t_vals], axis=1) # (Total_Patches, 3)
+    return mapped_coords
+
+def get_grid_pos(pos_rots, agent_start_loc):
+    mats = pos_rots_to_matrix(pos_rots) @ get_cv_to_habitat_correction()
+    agent_loc = mats[:,:3, 3]
+    # Calculate Heading (Yaw)
+    # np.arctan2(y, x) -> in our 3D grid case: np.arctan2(x, z)
+    # This returns a (B,) array of radians
+    forward_vectors = mats[:, :3, 2]
+    headings_rad = np.arctan2(forward_vectors[:, 0], forward_vectors[:, 2])
+    headings_deg = np.degrees(headings_rad)
+
+    # agent_pos = (agent_pos/0.15).astype(int)
+    agent_loc = agent_loc/0.15
+    agent_loc_map = get_thw_np(agent_loc, agent_start_loc)
+
+    return agent_loc_map, headings_deg
+
+def pos2grid(pos_rots):
+    mats = pos_rots_to_matrix(pos_rots) @ get_cv_to_habitat_correction()
+    agent_loc = mats[:,:3, 3]
+    agent_loc = agent_loc/0.15
+    return agent_loc

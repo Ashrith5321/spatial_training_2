@@ -7,56 +7,8 @@ from utils.habitat_worker import LoggingHabitatWorker
 from utils.vlm_worker import VLMWorker
 import numpy as np
 from tqdm import tqdm
+from utils.prompt_utils import substitute_convo_template, prepare_sequence_inputs
 
-def substitute_convo_template(conversation_template: List[Dict], substitutions: Dict[str, Any]) -> List[Dict]:
-    """
-    Traverses the conversation template and substitutes any string.Template 
-    objects found in 'text' fields using values from the 'obs' dictionary.
-    
-    Args:
-        conversation_template: List of message dicts (role, content).
-        substitutions: Dictionary containing substitution keys (e.g., 'goal_name').
-        
-    Returns:
-        A new conversation list with strings substituted.
-    """
-    new_conversation = []
-    
-    for message in conversation_template:
-        # Shallow copy the message container
-        new_message = message.copy()
-        new_content = []
-        
-        # Iterate over the content list (e.g., [{"type": "image"}, {"type": "text", ...}])
-        for item in message.get("content", []):
-            new_item = item.copy()
-            
-            # Check if this item is a text component
-            if "text" in new_item:
-                text_obj = new_item["text"]
-                
-                # CASE A: It's a Template object (from the config)
-                if "$" in text_obj:
-                    try:
-                        text_template = Template(text_obj)
-                        # Perform the substitution
-                        new_item["text"] = text_template.substitute(substitutions)
-                    except KeyError as e:
-                        raise
-                        # Fallback to safe_substitute to prevent crashing on missing keys,
-                        # but log it so we know something is wrong.
-                        # print(f"Warning: Missing substitution key {e} in template.")
-                        # new_item["text"] = text_template.safe_substitute(substitutions)
-                        
-                # CASE B: It's already a str (static text)
-                elif isinstance(text_obj, str):
-                    pass # Keep as is
-                    
-            new_content.append(new_item)
-        new_message["content"] = new_content
-        new_conversation.append(new_message)
-        
-    return new_conversation
 
 class EpisodeRolloutMixin:
     def run_episode(self,habitat_handle, initial_state_ref):
@@ -66,7 +18,7 @@ class EpisodeRolloutMixin:
             # Ray automatically waits for initial_state_ref to be ready before starting this task,
             # but we call ray.get to access the data.
             pos_id_kwargs={
-                "mode": "standard"
+                "mode": "standard" #TODO: make this configurable
             }
             if len(initial_state_ref)==2:
                 rgb,state_dict = initial_state_ref
@@ -76,6 +28,12 @@ class EpisodeRolloutMixin:
                 pos_id_kwargs['mode'] = "bev"
             step_count = 0
             done = False
+            
+            if self.debug_with_humanaction:
+                human_data = ray.get(habitat_handle.get_human_data.remote())
+                seq_messages, seq_images = prepare_sequence_inputs(human_data, state_dict['obs'] | self.rollout_config)
+                seq_action_probs = self.infer_sequence(seq_messages, seq_images, human_data, temperature = self.rollout_config['temperature'],pos_id_kwargs=pos_id_kwargs)
+                self.reset()
             messages = substitute_convo_template(self.rollout_config['convo_start_template'],state_dict['obs'] | self.rollout_config)
             # 2. The Interaction Loop
             vlm_logs={}
@@ -83,8 +41,10 @@ class EpisodeRolloutMixin:
             while not done and step_count < self.rollout_config['max_steps']:
                 # A. Prepare VLM Input
                 # (Assuming your formatting logic is here)
-                rgb_numpy = rgb
-                rgb_pil = Image.fromarray(rgb_numpy)
+                if isinstance(rgb, np.ndarray):
+                    rgb_pil = Image.fromarray(rgb)
+                else:
+                    rgb_pil = rgb
                 # B. Call VLM (Blocking)
                 # We must wait for the answer to decide the next step
                 # print("inferring VLM with messages:")
@@ -102,7 +62,9 @@ class EpisodeRolloutMixin:
 
                 # D. Step Simulator (Blocking) ---------------------------RAY----------------------------- 
                 t0 = time.time()
-                state_ref = ray.get(habitat_handle.step.remote(action_id,supplementary_logs=vlm_logs))
+                state_ref = ray.get(habitat_handle.step.remote(action_id,step_count,supplementary_logs=vlm_logs))
+                if self.debug_with_humanaction:
+                    action_id = ray.get(habitat_handle.get_step_data.remote())['action'][-1]
                 if len(state_ref)==2:
                     rgb,state_dict = state_ref
                 elif len(state_ref)==3:
@@ -110,12 +72,12 @@ class EpisodeRolloutMixin:
                     pos_id_kwargs['patch_coords'] = patch_coords
                     pos_id_kwargs['mode'] = "bev"
                 vlm_logs = {'mean/sim_latency':time.time()-t0,'min/sim_latency':time.time()-t0,'max/sim_latency':time.time()-t0}
-
-                messages = substitute_convo_template(self.rollout_config['convo_turn_template'],{"action":self.rollout_config['action_space'][action_id]})
+                messages = substitute_convo_template(self.rollout_config['convo_turn_template'],state_dict['obs'] | {"action":self.rollout_config['action_space'][action_id]})
                 # print(f"sim step{step_count}")
                 done = state_dict['done']
                 step_count += 1
-
+            if self.debug_with_humanaction:
+                self.compare_with_seq()
             return ray.get_runtime_context().current_actor,habitat_handle,state_dict['is_exhausted'], state_dict['info'] | {"steps":step_count, "goal_name":goal_name}
         except Exception as e:
             print(f"Episode failed: {e}")
@@ -167,14 +129,14 @@ class HabitatRayWorker(LoggingHabitatWorker):
             return rgb,patch_coords,state_dict
 
 
-    def step(self, action: int, supplementary_logs: Dict[str, Any] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def step(self, action: int, step_count: int, supplementary_logs: Dict[str, Any] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Returns:
             rgb: The heavy image array.
             state_dict: {'obs': ..., 'reward': ..., 'done': ..., 'info': ..., 'is_exhausted': ...}
         """
         # Base worker returns a single dict containing keys: 'obs', 'reward', 'done', 'info'
-        result = super().step(action, supplementary_logs=supplementary_logs)
+        result = super().step(action, step_count, supplementary_logs=supplementary_logs)
         # 1. Extract the heavy asset from the nested observation dict
         # We modify the dictionary in-place to avoid copying data
         rgb = result['obs'].pop("rgb")

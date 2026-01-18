@@ -1,3 +1,4 @@
+from numpy import False_
 import ray
 import argparse
 import logging
@@ -8,6 +9,7 @@ import textwrap
 # Import your workers and driver (assuming they are in `driver.py` or similar)
 from utils.inference_core import run_inference_driver,VLMRayWorker,HabitatRayWorker
 from utils.logging_workers import WandbLoggerActor
+from utils.prompt_utils import SYSTEM_PROMPT_TEMPLATE, CONVO_TURN_TEMPLATE, CONVO_START_TEMPLATE
 
 '''
 Eval Usage Example
@@ -34,7 +36,10 @@ OUTPUT_SCHEMA = {
     "obs":{
         "rgb":True,
         "goal_name":True,
-        "patch_coords":True
+        "patch_coords":True,
+        "step": True,
+        "agent_loc": True,
+        "agent_heading": True
     },
     "info":{
         "episode_label":True,
@@ -45,69 +50,6 @@ OUTPUT_SCHEMA = {
     },
     "done":True,
 }
-
-CONVO_TURN_TEMPLATE = [
-    {
-        "role": "assistant",
-        "content":[
-            {"type":"text","text": "**$action**"} # tell the agent what its last action was with substitution
-        ]
-    },
-    {
-        "role": "user",
-        "content": [ # Placeholder for the pixel data
-            {"type": "image"}
-        ],
-    },
-    {
-        "role": "assistant",
-        "content":[
-            {"type":"text","text": "**forward**"} # placeholder action to infer logprob during forward pass
-        ]
-    }
-]
-
-SYSTEM_PROMPT_TEMPLATE= textwrap.dedent("""\
-You are a visual navigation agent tasked with finding "$goal_name" in an unknown environment.
-You will receive a sequence of observations showing your movement history up to the current moment.
-
-**Action Space:**
-$action_space_str
-
-**Your Mission:**
-1. Analyze the observation history to understand your current location and orientation.
-2. Select the next discrete action to navigate efficiently towards the goal.
-
-**Critical Constraints:**
-* **Collision Detection:** If your previous action was **forward** but the visual observation did not change significantly, you have collided. You MUST turn or move away immediately. Do not keep pushing forward.
-* **Success Condition:** Output **stop** ONLY when the target is plainly in view, centered, and within 1 meter (close enough to touch).
-
-**Output Format:**
-Respond with the selected action inside double asterisks.
-""")
-
-
-
-CONVO_START_TEMPLATE = [
-    {
-        "role": "user",
-        "content": [ # Placeholder for the pixel data
-            {"type": "text", "text": SYSTEM_PROMPT_TEMPLATE},
-        ],
-    },
-    {
-        "role": "user",
-        "content": [ # Placeholder for the pixel data
-            {"type": "image"}
-        ],
-    },
-    {
-        "role": "assistant",
-        "content":[
-            {"type":"text","text": "**forward**"} # placeholder action to infer logprob during forward pass
-        ]
-    }
-]
 
 # --- Logging Setup ---
 def get_console_logger():
@@ -163,6 +105,7 @@ def main():
     parser.add_argument("--habitat-workspace", type=str, default="/Projects/SG_VLN_HumanData/SG-VLN")
     parser.add_argument("--scenes-dir", type=str, help="Path to HM3D/Gibson scenes")
     parser.add_argument("--split", type=str, default="val")
+    parser.add_argument("--debug_with_humanaction", action="store_true", help="Enable debugging mode using human action (defaults to False).")
     
     # Evaluation Config
     parser.add_argument("--episode-json", type=str, default="", help="Path to full list of episodes")
@@ -175,6 +118,11 @@ def main():
     parser.add_argument("--wandb-project",type=str, default='')
 
     args = parser.parse_args()
+
+    if args.debug_with_humanaction:
+        args.habitat_config = "configs/objectnav_mp3d_rgbd_semantic_human.yaml"
+        args.habitat_split = "val"
+        args.subset_label = "humandata_20"
 
     # 1. Setup
     logger = get_console_logger()
@@ -192,11 +140,12 @@ def main():
         )
     else:
         ray.init(address=args.ray_address)
+    # action_space_list = ["stop","forward","left","right","up","down"]
     action_space_list = ["stop","forward","left","right"]
     experiment_config = {
         "rollout_config": {
             "max_steps": args.max_steps,
-            "temperature": 1.2, # Sweet spot
+            "temperature": 1.0, #1.2, # Sweet spot
             "convo_start_template": CONVO_START_TEMPLATE, #template for the initial conversation chunk
             "convo_turn_template": CONVO_TURN_TEMPLATE, #template for the recurrent conversation chunks
             "action_space":action_space_list,
@@ -215,18 +164,18 @@ def main():
             "fn_guard": False, # use oracle to automatically perform stop action
 
             # specifying this enables bev/patch voxel grid!
-            "voxel_kwargs" : {
-                "patch_size":32,
-                "resolution":0.15,
-                "fov_degrees":79
-            }
+            # "voxel_kwargs" : {
+            #     "patch_size":32,
+            #     "resolution":0.15,
+            #     "fov_degrees":79
+            # }
         }
         
     }
 
     if args.wandb_project != "":
         RemoteWandbLogger = ray.remote(num_cpus=0,num_gpus=0,runtime_env={"conda": VLM_CONDA_ENV})(WandbLoggerActor)
-        wandb_logger = RemoteWandbLogger.remote(wandb_init_kwargs={"project":args.wandb_project,"name":args.run_name,"job_type":'eval'},run_config = experiment_config)
+        wandb_logger = RemoteWandbLogger.remote(wandb_init_kwargs={"project":args.wandb_project,"name":args.run_name,"job_type":'eval',"entity":"vlm_rl"},run_config = experiment_config)
     else:
         wandb_logger = None
 
@@ -265,7 +214,7 @@ def main():
     RemoteVLMWorker = VLMRayWorker.options(resources={args.vlm_resource_tag: 1},num_cpus=4,num_gpus=0.7,runtime_env=
             {"conda": VLM_CONDA_ENV,
                 "env_vars":{
-                # "CUDA_VISIBLE_DEVICES":"0,1"
+                # "CUDA_VISIBLE_DEVICES":"1"
                 }
                 # "env_vars": {
                 #     "GLOG_minloglevel": "2",  # 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL
@@ -287,6 +236,7 @@ def main():
     vlm_handles = [
         RemoteVLMWorker.remote(
             rollout_config=experiment_config['rollout_config'],
+            debug_with_humanaction=args.debug_with_humanaction,
             **experiment_config['vlm_config']
         ) for _ in range(args.num_vlms)
     ]
@@ -297,6 +247,7 @@ def main():
             config_path=args.habitat_config,
             scenes_dir=args.scenes_dir,
             split=args.split,
+            debug_with_humanaction=args.debug_with_humanaction,
             output_schema = OUTPUT_SCHEMA,
             logging_output_dir = str(os.path.join(args.output_dir, args.run_name, f'worker_{i}/')),
             logger_actor = wandb_logger,

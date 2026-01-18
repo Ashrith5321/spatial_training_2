@@ -1,3 +1,6 @@
 dump/
 wandb/
 *.ply
+*.mp4
+*.pyc
+utils/__pycache_

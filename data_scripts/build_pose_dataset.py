@@ -18,32 +18,48 @@ def to_convo(example):
     # image_list = example['rgb_sequence'] 
     import textwrap
 
-    system_prompt = textwrap.dedent(f"""\
-    You are a visual navigation agent tasked with finding "{example['goal_text']}" in an unknown environment.
-    You will receive a sequence of observations showing your movement history up to the current moment.
+    # system_prompt = textwrap.dedent(f"""\
+    # You are a visual navigation agent tasked with finding "{example['goal_text']}" in an unknown environment.
+    # You will receive a sequence of observations showing your movement history up to the current moment.
 
-    **Action Space:**
-    [STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT, LOOK_UP, LOOK_DOWN]
+    # **Action Space:**
+    # [STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT, LOOK_UP, LOOK_DOWN]
 
-    **Your Mission:**
-    1. Analyze the observation history to understand your current location and orientation.
-    2. Select the next discrete action to navigate efficiently towards the goal.
+    # **Your Mission:**
+    # 1. Analyze the observation history to understand your current location and orientation.
+    # 2. Select the next discrete action to navigate efficiently towards the goal.
 
-    **Critical Constraints:**
-    * **Collision Detection:** If your previous action was MOVE_FORWARD but the visual observation did not change significantly, you have collided. You MUST turn or move away immediately. Do not keep pushing forward.
-    * **Success Condition:** Output **STOP** ONLY when the target is plainly in view, centered, and within 1 meter (close enough to touch).
+    # **Critical Constraints:**
+    # * **Collision Detection:** If your previous action was MOVE_FORWARD but the visual observation did not change significantly, you have collided. You MUST turn or move away immediately. Do not keep pushing forward.
+    # * **Success Condition:** Output **STOP** ONLY when the target is plainly in view, centered, and within 1 meter (close enough to touch).
 
-    **Output Format:**
-    Respond with the selected action inside double asterisks.
-    """)
+    # **Output Format:**
+    # Respond with the selected action inside double asterisks.
+    # """)
+    system_prompt= textwrap.dedent(f"""\
+        You are a visual navigation agent tasked with finding "{example['goal_text']}" in an unknown environment.
+        You will receive a sequence of observations showing your movement history up to the current moment.
+        **Action Space:**
+        [stop, forward, left, right, up, down]
+        **Your Mission:**
+        1. Analyze the observation history to understand your current location and orientation.
+        2. Select the next discrete action to navigate efficiently towards the goal.
+        **Critical Constraints:**
+        * **Collision Detection:** If your previous action was **forward** but the visual observation did not change significantly, you have collided. You MUST turn or move away immediately. Do not keep pushing forward.
+        * **Success Condition:** Output **stop** ONLY when the target is plainly in view, centered, and within 1 meter (close enough to touch).
+        **Output Format:**
+        Respond with the selected action inside double asterisks.
+        """)
     convo = [
         {"role": "user", "content": [
                 # Text Item: explicit None for image
                 {"type": "text", "text": system_prompt}, 
         ]},
     ]
-
+    action_mapping = {'STOP': 'stop', 'MOVE_FORWARD': 'forward', 
+                        'TURN_LEFT': 'left', 'TURN_RIGHT': 'right', 'LOOK_UP': 'up', 'LOOK_DOWN': 'down'}
     for i, action in enumerate(example['action_sequence']):
+        action = action_mapping[action]
         convo += [
              {"role": "user", "content": [
                 # Text Item: explicit None for image

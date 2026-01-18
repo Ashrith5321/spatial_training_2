@@ -1,0 +1,10 @@
+vlm:
+conda create -n vlm_node_1016 python=3.10.16 --no-default-packages -y
+
+conda activate vlm_node_1016
+
+pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+
+pip install transformers==4.57.3 flash_attn=2.8.3
+
+pip install --upgrade tensordict

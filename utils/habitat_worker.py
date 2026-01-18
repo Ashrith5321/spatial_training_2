@@ -10,6 +10,10 @@ from PIL import Image
 import time
 import numpy as np
 from typing import Optional, Any
+from datasets import load_from_disk, load_dataset, Sequence
+from datasets import Image as hugging_Image
+from utils.bev_utils import load_depth, pos2grid, get_grid_pos
+
 @contextmanager
 def suppress_cpp_output():
     """
@@ -254,7 +258,7 @@ def get_scene_id(scene_path):
     return scene_id
 
 class HabitatWorker:
-    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None):
+    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val", debug_with_humanaction=False, postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None):
         from habitat.config.default import get_config
         from habitat.config import read_write
         from habitat.config.default_structured_configs import (
@@ -286,6 +290,15 @@ class HabitatWorker:
 
         self.fn_guard = fn_guard
         self.fp_guard = fp_guard
+        self.debug_with_humanaction = debug_with_humanaction
+        if self.debug_with_humanaction:
+            # eval_dataset_dir = '/Projects/SG_VLN_HumanData/SG-VLN/data/sft_datasets/train'
+            eval_dataset_dir = '/Projects/SG_VLN_HumanData/SG-VLN/data/sft_datasets/17DRP5sb8fy_json'
+            if not os.path.exists(os.path.expanduser(eval_dataset_dir)) and "/" in eval_dataset_dir:
+                human_dataset = load_dataset(eval_dataset_dir, split="val")
+            else:
+                human_dataset = load_from_disk(eval_dataset_dir)
+            self.human_dataset = human_dataset.cast_column("images", Sequence(hugging_Image(decode=True)))
 
         self.voxel_kwargs = voxel_kwargs
         # --- Initialize Config & Env ---
@@ -371,8 +384,77 @@ class HabitatWorker:
         )
         print(f"Actor assigned with shard of {len(dataset.episodes)} episodes.")
 
+    def init_human_data(self):
+        episode_id = self.env.habitat_env._current_episode.raw_episode_id
+        human_data = self.human_dataset.filter(lambda x: x['episode_id'] == episode_id)
+        cur_human_data = human_data['validation'][0]
+        self.cur_human_data = cur_human_data
+        return 
+    
+    def get_human_data(self):
+        return self.cur_human_data
+    
+    def get_human_depth(self, step_count):
+        depth = load_depth(self.cur_human_data['depth_sequence'][step_count])
+        return depth
 
-    def step(self, action:int,supplementary_logs={}):
+    def get_human_rgb(self, step_count):
+        rgb = self.cur_human_data['images'][step_count]
+        return rgb
+
+    def get_human_posrot(self, step_count):
+        pos_rots = self.cur_human_data['pos_rots'][step_count]
+        return pos_rots
+    
+    def get_human_action(self, step_count):
+        agent_gt_traj = self.env.habitat_env._current_episode.reference_replay
+        action_keys = {'STOP':0, 'MOVE_FORWARD':1, 'TURN_LEFT':2, 'TURN_RIGHT':3, 'LOOK_UP':4, 'LOOK_DOWN':5}
+        human_action = action_keys[agent_gt_traj[step_count+1]['action']]
+        return human_action
+    
+    def get_step_data(self):
+        return self.steps
+
+    def step_by_pose(self, position, rotation):
+        '''
+        In dataset, we save rotation as [x,y,z,w]
+        Habitat need: [w,x,y,z]
+        '''
+        import habitat
+        import quaternion
+        # 1. Access the underlying simulator
+        sim = self.env.unwrapped.habitat_env.sim
+        
+        # 2. Teleport the agent
+        agent = sim.get_agent(0)
+        state = agent.get_state()
+        state.position = [position[0], position[1]-0.88, position[2]]
+        state.rotation = quaternion.from_float_array([rotation[3],rotation[0],rotation[1],rotation[2]])
+        agent.set_state(state)
+        
+        # 3. Trigger the Task Update
+        # We pass a 'None' or 'Empty' action to avoid moving again, 
+        # but this forces Habitat to recalculate rewards, metrics, and sensors.
+        # Note: 'action' usually needs to be in the format the env expects (e.g., 0 or a dict)
+        # dummy_action = 0 
+        # obs, reward, done, info = self.env.step(dummy_action)
+        obs = sim.get_sensor_observations()
+        measurements = self.env.unwrapped.habitat_env.task.measurements.get_metrics()
+        reward = 0.0
+        done = False
+        info = measurements
+        
+        # state = self.env.habitat_env.sim.get_agent_state()
+        # cam_state = self.env.habitat_env.sim.get_agent(0)._sensors['rgb'].node
+        # T_np = np.array(cam_state.absolute_transformation())
+        # pos = T_np[:3, 3]
+        # rot = state.rotation  # Quaternion
+
+        # print('before set: ', position, rotation)
+        # print('after set: ', pos, [rot.x, rot.y, rot.z, rot.w])
+        return obs, reward, done, info
+        
+    def step(self, action:int, step_count:int, supplementary_logs={}):
         """
         Standard step. 
         Args:
@@ -393,11 +475,22 @@ class HabitatWorker:
             if self.fn_guard: 
                 action = 0
             extras['fn_stop'] = 1
+        if self.debug_with_humanaction:
+            action = self.get_human_action(step_count)
         import time
-        # t0 = time.time()
-        obs, reward, done, info = self.env.step(action)      
+        # t0 = time.time()    
         # print(f"stepping env took {time.time()-t0}")   
         # t0 = time.time()
+
+        if self.debug_with_humanaction and step_count < len(self.cur_human_data['depth_sequence'])-1:
+            human_pos_rots = self.get_human_posrot(step_count+1)
+            obs, reward, done, info = self.step_by_pose(human_pos_rots[:3], human_pos_rots[3:])
+            obs['rgb'] = self.get_human_rgb(step_count+1)
+            obs['depth'] = self.get_human_depth(step_count+1)
+            obs['pos_rots'] = human_pos_rots
+        else:
+            obs, reward, done, info = self.env.step(action)
+            obs['depth'] *= 5.0
 
         step_dict = {
         "obs":obs,
@@ -406,8 +499,13 @@ class HabitatWorker:
         "info": info
         }
 
+        # print('step: ', step_count, action)
         if self.postprocess:
             step_dict = self._postprocess_step(step_dict)
+            agent_pos, agent_heading = get_grid_pos(np.array(step_dict['info']['pos_rots']).reshape(1,-1), self.agent_start_loc)
+            step_dict['obs']['agent_loc'] = agent_pos[0]
+            step_dict['obs']['agent_heading'] = agent_heading[0]
+            step_dict['obs']['step'] = step_count + 1
             extras['stuck'] = np.linalg.norm(np.array(self.last_step['info']['pos_rots'])-np.array(step_dict['info']['pos_rots']))<1e-5 # record collisions
 
         if self.enable_caching:
@@ -467,8 +565,20 @@ class HabitatWorker:
         "done": False,
         "info": info
         }
+        if self.debug_with_humanaction:
+            self.init_human_data()
+            step_dict['obs']['rgb'] = self.get_human_rgb(0)
+            step_dict['obs']['depth'] = self.get_human_depth(0)
+            step_dict['obs']['pos_rots'] = self.get_human_posrot(0)
+        else:
+            step_dict['obs']['depth'] *= 5.0
         if self.postprocess:
             step_dict = self._postprocess_step(step_dict)
+            self.agent_start_loc = pos2grid(np.array(step_dict['info']['pos_rots']).reshape(1,-1))
+            agent_pos, agent_heading = get_grid_pos(np.array(step_dict['info']['pos_rots']).reshape(1,-1), self.agent_start_loc)
+            step_dict['obs']['agent_loc'] = agent_pos[0]
+            step_dict['obs']['agent_heading'] = agent_heading[0]
+            step_dict['obs']['step'] = 0
         if self.enable_caching:
             self._cache_step(self._apply_schema(step_dict,self.logging_schema) | {"timestamp": time.time()})
         self.last_step = step_dict
@@ -530,7 +640,11 @@ class HabitatWorker:
         
         if self.env.habitat_env.sim:
             state = self.env.habitat_env.sim.get_agent_state()
-            pos = state.position  # Vector3
+
+            # pos = state.position  # Vector3
+            cam_state = self.env.habitat_env.sim.get_agent(0)._sensors['rgb'].node
+            T_np = np.array(cam_state.absolute_transformation())
+            pos = T_np[:3, 3]
             rot = state.rotation  # Quaternion
 
             info['pos_rots'] = [
@@ -538,10 +652,26 @@ class HabitatWorker:
                 float(rot.x), float(rot.y), float(rot.z), # qx, qy, qz
                 float(rot.w)                                 # w
             ]
+            # state = self.env.habitat_env.sim.get_agent(0)._sensors['rgb'].node
+            # T_np = np.array(state.absolute_transformation())
+            # pos = T_np[:3, 3]
+            # rot_matrix = T_np[:3, :3]
+            # rot = R.from_matrix(rot_matrix).as_quat()
+            # info['pos_rots'] = [
+            #     float(pos[0]), float(pos[1]), float(pos[2]),      # x, y, z
+            #     float(rot[0]), float(rot[1]), float(rot[2]), # qx, qy, qz
+            #     float(rot[3])                                 # w
+            # ]
+
+            # if 'pos_rots' in obs:
+            #     print('info: ', info['pos_rots'], 'obs: ', obs['pos_rots'])
+            #     print('diff: ', [info['pos_rots'][i] - obs['pos_rots'][i] for i in range(len(info['pos_rots']))])
+                # assert info['pos_rots'] == obs['pos_rots']
             if self.voxel_kwargs is not None:
                 from utils.bev_utils import get_patch_coords
                 H,W = step_dict['obs']['depth'].shape[:2] 
-                obs['patch_coords'] = get_patch_coords(np.array([info['pos_rots']]),step_dict['obs']['depth'].reshape((1,H,W)),**self.voxel_kwargs)[0] # 1 by H by W by 3 patch coords
+                pos_rots = np.array([obs['pos_rots']]) if 'pos_rots' in obs else np.array([info['pos_rots']])
+                obs['patch_coords'] = get_patch_coords(pos_rots, step_dict['obs']['depth'].reshape((1,H,W)),**self.voxel_kwargs)[0] # 1 by H by W by 3 patch coords
         info['scene_id']=get_scene_id(self.env.current_episode().scene_id)
         info['episode_id']=self.env.current_episode().episode_id
         info['episode_label']=f"{info['scene_id']}_{info['episode_id']}"
