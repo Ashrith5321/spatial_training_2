@@ -1,6 +1,6 @@
 '''
 🚀 [run experiment]:
-python3 training_scripts/train_rl.py +experiment <experiment_name>
+python3 training_scripts/train_rl.py +experiment=<experiment_name> +node=<goldeen/lighthouse>
 NOTE: experiment_name must be a config that exists in conf/experiment.
 
 ⚙️ [add experiment config]:
@@ -125,7 +125,8 @@ def main(cfg: RLConfig):
             # ------------------------------------------- rollouts ------------------------------------------
             logger.info("Starting rollout collection!")
 
-            rollout_list = collect_rollouts(sims,trainers,shard_iter,target_episodes=bootstrapper.typed_cfg.training.rl_config.n_rollout) #
+            # rollout_list = collect_rollouts(sims,trainers,shard_iter,target_episodes=bootstrapper.typed_cfg.training.rl_config.n_rollout) #
+            rollout_list,result_dict,log_dict = collect_rollouts(sims,trainers,shard_iter,bootstrapper.typed_cfg.training.rl_config.n_rollout) #
 
             print("done collecting")
             num_vlms = len(trainers)
@@ -135,19 +136,23 @@ def main(cfg: RLConfig):
             trajectory_list = trajectory_list[-bootstrapper.typed_cfg.training.rl_config.n_adv:]
             traj_batch = collate_trajectories(trajectory_list)
             model_inputs = [(tup[1],tup[2]) for tup in rollout_list]
-
+            
+            values = traj_batch.get("values",None)
+            distances = traj_batch.get('distance_to_goal',None)
             # ---------------------------------- compute gae ----------------------------------------------
             print("Computing Advantages")
-            config = bootstrapper.resolved_dict['training']['rl_config']
+            # config = bootstrapper.resolved_dict['training']['rl_config']
             # Note: compute_gae expects (B, T) inputs and returns (B, T)
-            advantages, returns = advantage_estimator_fn(
+            adv_tuple = advantage_estimator_fn(
                 token_level_rewards=traj_batch['rewards'],
-                # values=traj_batch['values'],
+                values=values,
+                distances = distances,
                 response_mask=traj_batch['response_mask'],
                 config = cfg.training.rl_config,
                 # gamma=config.get('gamma', 0.99), # Fallback defaults if not in config
                 # lam=config.get('lam', 0.95)
             )
+            advantages, returns = adv_tuple[0],adv_tuple[1]
 
             traj_batch['advantages'] = advantages
             traj_batch['returns'] = returns
