@@ -3,4 +3,5 @@ wandb/
 *.ply
 *.mp4
 *.pyc
+*.npy
 utils/__pycache_
