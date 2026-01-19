@@ -43,6 +43,7 @@ def main(cfg: RLConfig):
     from utils.rl_core import collate_trajectories,collect_rollouts
     from verl.trainer.ppo.core_algos import get_adv_estimator_fn,AdvantageEstimator,POLICY_LOSS_REGISTRY
     import signal
+    import json
 
     def debug_signal_handler(sig, frame):
         # should allow us to interrupt the loop, save data etc, and resume
@@ -126,7 +127,7 @@ def main(cfg: RLConfig):
             logger.info("Starting rollout collection!")
 
             # rollout_list = collect_rollouts(sims,trainers,shard_iter,target_episodes=bootstrapper.typed_cfg.training.rl_config.n_rollout) #
-            rollout_list,result_dict,log_dict = collect_rollouts(sims,trainers,shard_iter,bootstrapper.typed_cfg.training.rl_config.n_rollout) #
+            rollout_list,result_list,log_list = collect_rollouts(sims,trainers,shard_iter,bootstrapper.typed_cfg.training.rl_config.n_rollout) #
 
             print("done collecting")
             num_vlms = len(trainers)
@@ -233,9 +234,14 @@ def main(cfg: RLConfig):
                             "rollout/success": traj_stats['success'].max().item(), 
                             "rollout/spl": traj_stats['spl'].max().item(),
                             "rollout/ep_rtn": traj_stats['returns'].mean().item(),
+                            "rollout/global_cycle": global_cycle
                         }
                         result |= rollout_stats
-                        wandb_actor.log.remote(result)
+                        log_path = ray.get(log_list[rollout_idx])
+                        with open(log_path,'r') as f:
+                            vlm_log_dict = json.load(f)
+                        result |= vlm_log_dict
+                        wandb_actor.log_row.remote(result)
                         completed_count += 1
                      
                         print(f"[{completed_count}/{total_tasks}] Complete. {result}")
@@ -250,6 +256,7 @@ def main(cfg: RLConfig):
             else:
                 print(f"T-{steps_until_save} steps until checkpoint!")
     finally:
+
         cleanup()
 
 if __name__ == "__main__":

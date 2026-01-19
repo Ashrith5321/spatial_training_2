@@ -475,11 +475,14 @@ def compute_reinforce_plus_plus_distance_kernel_advantage(
         # E. Compute Baseline Table
         # Baseline[bin] = Avg Return for that distance
         baseline_table = smoothed_sum / (smoothed_count + 1e-8) # (1, 1, num_bins)
+        if config.baseline_offset is not None:
+            baseline_table+=config.baseline_offset
         baseline_table = baseline_table.view(-1) # (num_bins,)
         
         # F. Project back to Token Space (Gather)
         # Map bin values back to original token positions
         baseline_flat = baseline_table[flat_indices]
+        
         baseline = baseline_flat.view(bs, seq_len)
         
         # 3. Compute Advantage
@@ -493,3 +496,121 @@ def compute_reinforce_plus_plus_distance_kernel_advantage(
         advantages = advantages * response_mask
 
     return advantages, returns, baseline_table
+
+@register_adv_est("reinforce_plus_plus_distance_kernel_var_norm")
+def compute_reinforce_plus_plus_distance_kernel_var_norm_advantage(
+    token_level_rewards: torch.Tensor, 
+    response_mask: torch.Tensor, 
+    config: Optional[AlgoConfig] = None, 
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Computes Advantage using Distance-Conditional Mean AND Variance.
+    
+    1. Estimates Mean: mu(d) = E[G | d]
+    2. Estimates Variance: sigma^2(d) = E[G^2 | d] - mu(d)^2
+    3. Normalizes Locally: A = (G - mu(d)) / sigma(d)
+    
+    This solves the signal drowning problem where high-variance 'far' states 
+    dominate the global normalization, suppressing precise 'near' state signals.
+    """
+    assert config is not None
+    # Check for required distance feature
+    distances = kwargs.get('distances')
+    if distances is None:
+         if 'info' in kwargs and 'distance_to_goal' in kwargs['info']:
+             distances = kwargs['info']['distance_to_goal']
+         else:
+             raise ValueError("Requires 'distances' in kwargs.")
+
+    gamma = config.gamma
+    device = token_level_rewards.device
+    bs, seq_len = token_level_rewards.shape
+    
+    with torch.no_grad():
+        # 1. Standard Discounted Return Calculation
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+        for t in reversed(range(seq_len)):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            running_return = running_return * response_mask[:, t]
+
+        # ---------------------------------------------------------------------
+        # 2. Kernel Estimation of Mean AND Second Moment
+        # ---------------------------------------------------------------------
+        
+        bin_resolution = 0.1 
+        kernel_sigma_meters = 0.5 
+        if config.distance_kernel_sigma is not None:
+            kernel_sigma_meters = config.distance_kernel_sigma 
+        sigma_bins = kernel_sigma_meters / bin_resolution
+
+        kernel_size = int(6 * sigma_bins) + 1 
+        
+        valid_distances = distances * response_mask
+        max_dist = valid_distances.max()
+        dist_indices = (valid_distances / bin_resolution).long()
+        num_bins = int(max_dist / bin_resolution) + 1 + (kernel_size // 2)
+        
+        flat_indices = dist_indices.view(-1)
+        flat_returns = (returns * response_mask).view(-1)
+        flat_sq_returns = (flat_returns ** 2) # Pre-compute squares
+        flat_counts = response_mask.view(-1)
+        
+        # Accumulators for E[G], E[G^2], and N
+        bin_sum = torch.zeros(num_bins, device=device)
+        bin_sq_sum = torch.zeros(num_bins, device=device)
+        bin_count = torch.zeros(num_bins, device=device)
+        
+        bin_sum.scatter_add_(0, flat_indices, flat_returns.float())
+        bin_sq_sum.scatter_add_(0, flat_indices, flat_sq_returns.float())
+        bin_count.scatter_add_(0, flat_indices, flat_counts.float())
+        
+        # Kernel Smoothing (1D Conv)
+        kernel = _generate_gaussian_kernel_1d(sigma_bins, kernel_size, device)
+        pad = kernel_size // 2
+        
+        # Pad and Convolve all three statistics
+        # Note: We group operations for efficiency
+        stacked_inputs = torch.stack([bin_sum, bin_sq_sum, bin_count]).unsqueeze(0) # (1, 3, bins)
+        padded_inputs = F.pad(stacked_inputs, (pad, pad), mode='replicate')
+        
+        # We need a grouped convolution or just loop. Since it's only 3 channels, 
+        # using groups=1 with repeated kernel is easy, or just simple loop.
+        # Let's use simple loop for clarity as cost is negligible.
+        smoothed_sum = F.conv1d(padded_inputs[:, 0:1], kernel)
+        smoothed_sq_sum = F.conv1d(padded_inputs[:, 1:2], kernel)
+        smoothed_count = F.conv1d(padded_inputs[:, 2:3], kernel)
+        
+        # Compute Conditional Stats
+        # E[G|d]
+        mean_table = smoothed_sum / (smoothed_count + 1e-8)
+        
+        # E[G^2|d]
+        sq_mean_table = smoothed_sq_sum / (smoothed_count + 1e-8)
+        
+        # Var[G|d] = E[G^2] - (E[G])^2
+        # Clamp to 0 to handle floating point noise causing negative variance
+        var_table = torch.clamp(sq_mean_table - (mean_table ** 2), min=0.0)
+        std_table = torch.sqrt(var_table)
+        
+        # Map back to tokens
+        mean_table = mean_table.view(-1)
+        std_table = std_table.view(-1)
+        
+        mu_d = mean_table[flat_indices].view(bs, seq_len)
+        sigma_d = std_table[flat_indices].view(bs, seq_len)
+        
+        # 3. Compute Locally Normalized Advantage
+        # A = (G - mu(d)) / (sigma(d) + epsilon)
+        advantages = (returns - mu_d) / (sigma_d + 1e-5)
+        # 4. Optional Global Polish
+        # Since we effectively Z-scored everything locally, the global mean is roughly 0 
+        # and global std is roughly 1. 
+        # We perform one final lightweight whitening to catch any outliers or 
+        # systematic drift, ensuring strict stability for PPO clipping.
+        advantages = verl_F.masked_whiten(advantages, response_mask)
+        advantages = advantages * response_mask
+
+    return advantages, returns, mean_table, std_table

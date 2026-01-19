@@ -295,7 +295,7 @@ def chunk_list(all_episodes: List[str], shard_size: int) -> Iterator[List[str]]:
     for i in range(0, len(all_episodes), shard_size):
         yield all_episodes[i : i + shard_size]
         
-def get_console_logger():
+def get_console_logger(name = "DriverMain"):
     """Sets up a central logger and directory structure."""
     
     logging.basicConfig(
@@ -305,7 +305,7 @@ def get_console_logger():
             logging.StreamHandler()
         ]
     )
-    return logging.getLogger("EvalMain")
+    return logging.getLogger(name)
 
 def get_shard_iterator(
     shard_size: int, 
