@@ -60,6 +60,7 @@ class RLAlgoConfig:
     clip_ratio_low: Optional[float] = None
     clip_ratio_high: Optional[float] = None
     clip_ratio_c: float = 3.0
+    loss_agg_mode: Optional[str] = "seq-mean-token-sum"
     
     # clip cov parameters
     policy_loss:PolicyLossConfig = field(default_factory=PolicyLossConfig)
@@ -68,7 +69,7 @@ class RLAlgoConfig:
     lam: float = 0.95
 
     time_kernel_sigma: float = 5.0
-    distance_kernel_sigma: float = 1.2
+    distance_kernel_sigma: float = 0.5
 
     # Value & Entropy
     cliprange_value: float = 0.2
@@ -126,6 +127,7 @@ class VLMTrainingConfig:
     mixed_precision: Optional[str] = "no" #['no', 'fp8', 'fp16', 'bf16']
     gradient_checkpointing: bool = True
     total_optimization_steps: int = 100000 # used for linear LR schedule
+    warmup_steps: int = 64
     save_step: Optional[int] = 10
 
     # Value Head Configuration

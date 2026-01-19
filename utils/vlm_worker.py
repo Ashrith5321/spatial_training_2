@@ -687,26 +687,29 @@ class VLMTrainingMixin:
         # Only optimize parameters that require gradients (i.e., the Adapters)
         print(f"accelerator device: {self.accelerator.device}")
         wrapper = VLMWrapper(self.model)
-        head_params = [p for n, p in wrapper.named_parameters() if "value_head" in n and p.requires_grad]
         rest_params = [p for n, p in wrapper.named_parameters() if "value_head" not in n and p.requires_grad]
 
         optimizer_grouped_parameters = [
-            {
-                "params": head_params,
-                "lr": config.value_head_learning_rate,
-                "name": "value_head"
-            },
             {
                 "params": rest_params,
                 "lr": config.learning_rate,
                 "name": "adapters"
             }
         ]
+
+        if config.rl_config.use_value:
+            head_params = [p for n, p in wrapper.named_parameters() if "value_head" in n and p.requires_grad]
+            optimizer_grouped_parameters+=[
+                {
+                    "params": head_params,
+                    "lr": config.value_head_learning_rate,
+                    "name": "value_head"
+                }]
         optimizer = AdamW(optimizer_grouped_parameters)
         scheduler = get_scheduler(
             name="linear",
             optimizer=optimizer,
-            num_warmup_steps=10, # Short warmup usually sufficient for RL
+            num_warmup_steps=config.warmup_steps, # Short warmup usually sufficient for RL
             num_training_steps=config.total_optimization_steps
         )
 
@@ -719,7 +722,7 @@ class VLMTrainingMixin:
         )            
 
         if config.checkpoint is not None:
-            self.load_checkpoint(config.checkpoint,config.load_optim,config.load_sched)
+            self.load_checkpoint(config.checkpoint,True,config.load_optim,config.load_sched)
 
     def train_sft_step(self, batch):
         """
@@ -921,13 +924,14 @@ class VLMTrainingMixin:
         if os.path.exists(os.path.join(path, "adapter_model.bin")) or os.path.exists(os.path.join(path, "adapter_model.safetensors")):
              adapter_state_dict = load_peft_weights(path)
              set_peft_model_state_dict(self.model, adapter_state_dict)
-             print(" -> Adapters and Value Head loaded.")
+             print(" -> Adapters and (maybe) Value Head loaded.")
         else:
              print(" -> ⚠️ No adapter weights found in checkpoint.")
 
         # 3. Load Optimizer
         opt_path = os.path.join(path, "optimizer.pt")
         if os.path.exists(opt_path) and load_optim:
+            print("loading optimizer!")
             opt_state = torch.load(opt_path, map_location=self.accelerator.device)
             self.optimizer.load_state_dict(opt_state)
             print(" -> Optimizer loaded.")
@@ -935,6 +939,7 @@ class VLMTrainingMixin:
         # 4. Load Scheduler
         sched_path = os.path.join(path, "scheduler.pt")
         if os.path.exists(sched_path) and load_sched:
+            print("loading scheduler!")
             sched_state = torch.load(sched_path, map_location=self.accelerator.device)
             self.scheduler.load_state_dict(sched_state,weights_only=True)
             print(" -> Scheduler loaded.")
