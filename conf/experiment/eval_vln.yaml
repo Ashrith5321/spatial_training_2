@@ -1,7 +1,7 @@
 # @package _global_
 task:
-  run_name: override_me
-  wandb_project: "vln_eval_rl_model"
+  run_name: rl_model_89
+  wandb_project: "vln_eval"
   shard_size: 0 #currently there is no valid label!
   subset_label: "sample400"
   episode_json: ''
@@ -33,7 +33,7 @@ rollout:
   - left
   - right
 vlm:
-  model_id: null
+  model_id: Phyllis1/qwen3_sft_rpp_t_rwd_fix_rerun_ckpt89
   attn_impl: flash_attention_2
   dtype: bfloat16
   vocab:
@@ -57,7 +57,7 @@ sim:
   auto_flush: false
   ep_seed: null #null because dataloader not working yet
 training:
-  checkpoint: Aasdfip/rpp_t_clipcov_llr_new-checkpoint_271
+  checkpoint: null #Aasdfip/rpp_t_clipcov_llr_new-checkpoint_271
   load_optim: false
   load_sched: false
   learning_rate: 1.0e-05

@@ -135,7 +135,7 @@ def main():
     # 2. Resolve Paths
     _temp_dir_handle = None 
 
-    if args.r:
+    if args.r and args.r!="" and args.r!="local":
         print(f"☁️  Remote mode detected. Fetching from {args.r}...")
         
         # Create a temporary directory
