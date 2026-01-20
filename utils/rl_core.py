@@ -544,6 +544,8 @@ def compute_reinforce_plus_plus_distance_kernel_var_norm_advantage(
         kernel_sigma_meters = 0.5 
         if config.distance_kernel_sigma is not None:
             kernel_sigma_meters = config.distance_kernel_sigma 
+        if config.distance_clip_max is not None:
+            distances = torch.clamp(distances,max=config.distance_clip_max)
         sigma_bins = kernel_sigma_meters / bin_resolution
 
         kernel_size = int(6 * sigma_bins) + 1 

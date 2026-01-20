@@ -22,7 +22,7 @@ class ResourceConfig:
 # --- 3. Model & Worker Configs ---
 @dataclass
 class VLMConfig:
-    model_id: str = "Phyllis1/qwen3_sft_sft_sparse_03drop_single_action_20260103_210803_ckpt10800"
+    model_id: Optional[str] = "Phyllis1/qwen3_sft_sft_sparse_03drop_single_action_20260103_210803_ckpt10800"
     attn_impl: str = "flash_attention_2"
     dtype: str = "bfloat16"
     prefix: str = '<|im_start|>assistant\n**'
@@ -60,7 +60,7 @@ class RLAlgoConfig:
     clip_ratio_low: Optional[float] = None
     clip_ratio_high: Optional[float] = None
     clip_ratio_c: float = 3.0
-    loss_agg_mode: Optional[str] = "seq-mean-token-sum"
+    loss_agg_mode: Optional[str] = "token-mean" #"seq-mean-token-sum" seq-mean-token-mean
     
     # clip cov parameters
     policy_loss:PolicyLossConfig = field(default_factory=PolicyLossConfig)
@@ -70,6 +70,7 @@ class RLAlgoConfig:
 
     time_kernel_sigma: float = 5.0
     distance_kernel_sigma: float = 0.5
+    distance_clip_max: Optional[float] = 17.0
 
     # Value & Entropy
     cliprange_value: float = 0.2
@@ -154,8 +155,8 @@ class HabitatConfig:
     fp_guard: bool = True
     fn_guard: bool = False
     voxel_kwargs: Optional[Dict[str, Any]] = field(default_factory=lambda: None)
-    output_schema: Dict[str, Any] = field(default_factory=lambda: {
-        "obs": {"rgb": True, "goal_name": True, "patch_coords": False},
+    output_schema: Optional[Dict[str, Any]] = field(default_factory=lambda: {
+        "obs": {"rgb": True, "instr_or_goal": True, "patch_coords": False},
         "info": {"episode_label": True, "spl": True, "soft_spl":True, "success": True,"distance_to_goal":True},
         "done": True,
         "reward": True,

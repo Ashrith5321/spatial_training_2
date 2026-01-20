@@ -39,7 +39,7 @@ sim:
   output_schema:
     obs:
       rgb: true
-      goal_name: true
+      instr_or_goal: true
       patch_coords: false
     info:
       episode_label: true

@@ -13,6 +13,8 @@ https://hydra.cc/docs/intro/
 
 🔧 [install tab completion]:
 eval "$(python training_scripts/train_rl.py -sc install=bash)"
+eval "$(python rl_eval.py -sc install=bash)"
+
 NOTE: tab completion only works if your command uses python not python3. somehow.
 '''
 
@@ -62,7 +64,10 @@ def main(cfg: RLConfig):
     )
 
     shard_iter,shard_iter_copy = itertools.tee(shard_iter)
-    all_episodes = [s for shard in shard_iter_copy for s in shard]
+    try:
+        all_episodes = [s for shard in shard_iter_copy for s in shard]
+    except:
+        all_episodes = [None]*1000 #fallback
     trajectory_list = []
 
     def cleanup():

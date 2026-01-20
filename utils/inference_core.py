@@ -33,7 +33,7 @@ def substitute_convo_template(conversation_template: List[Dict], substitutions: 
     
     Args:
         conversation_template: List of message dicts (role, content).
-        substitutions: Dictionary containing substitution keys (e.g., 'goal_name').
+        substitutions: Dictionary containing substitution keys (e.g., 'instr_or_goal').
         
     Returns:
         A new conversation list with strings substituted.
@@ -114,7 +114,6 @@ class EpisodeRolloutMixin:
                 rgb,patch_coords,state_dict = initial_state_ref
                 pos_id_kwargs['patch_coords'] = patch_coords
                 pos_id_kwargs['mode'] = "bev"
-
             step_count = 0
             done = False
             messages = substitute_convo_template(self.rollout_config['convo_start_template'],state_dict['obs'] | self.rollout_config)
@@ -122,7 +121,7 @@ class EpisodeRolloutMixin:
             vlm_logs={}
             # Trajectory Buffer (List is fine here!)
             trajectory_buffer = []
-            goal_name = state_dict['obs']['goal_name']
+            instr_or_goal = state_dict['obs']['instr_or_goal']
             episode_label = state_dict['info']['episode_label']
             while not done and step_count < self.rollout_config['max_steps']:
                 # A. Prepare VLM Input
@@ -180,7 +179,7 @@ class EpisodeRolloutMixin:
                 step_count += 1
                 # Convert list of dicts -> Dict of Numpy Arrays (Zero-Copy Friendly)
             final_trajectory = self._pack_trajectory(trajectory_buffer) if collect_trajectory else None
-            final_info = state_dict['info'] | {"steps":step_count, "goal_name":goal_name}
+            final_info = state_dict['info'] | {"steps":step_count, "instr_or_goal":instr_or_goal}
             # Return Clean Tuple (No Actor Handles here)
             return habitat_handle, state_dict['is_exhausted'], final_info, final_trajectory
         
