@@ -134,7 +134,7 @@ def main():
 
     # 2. Resolve Paths
     _temp_dir_handle = None 
-
+    remote_ckpt_str = str(args.checkpoint_path).rstrip('/')
     if args.r and args.r!="" and args.r!="local":
         print(f"☁️  Remote mode detected. Fetching from {args.r}...")
         
@@ -145,7 +145,7 @@ def main():
         
         # Determine remote paths (assuming standard structure on remote)
         # We treat the input path as a string to manipulate it for rsync
-        remote_ckpt_str = str(args.checkpoint_path).rstrip('/')
+        
 # ---------------------------------------------------------
         # A. & B. Robust Single-Pass Rsync (Filter Method)
         # ---------------------------------------------------------
