@@ -1,3 +1,6 @@
 dump/
 wandb/
 *.ply
+outputs/
+__pycache__
+ray_object_spilling
