@@ -39,23 +39,54 @@ def suppress_cpp_output():
             
 def apply_schema(data, schema):
     """
-    Recursively filters 'data' to only include keys present in 'schema'.
-    Structure matches schema; values in schema are ignored (placeholders).
+    Filters data based on schema.
+    
+    Special Logic:
+    - Keys starting with '+' (e.g. '+my_metric') are treated as "Default Allow".
+      1. The '+' is stripped from the output key.
+      2. The key is KEPT unless the schema explicitly sets the stripped name to False.
     """
     if schema is None:
+        for key in data.keys():
+            if key.startswith('+'):
+                data[key[1:]]=data.pop(key)
         return data
+        
     result = {}
-    for key, sub_schema in schema.items():
-        if key in data:
-            # If both are dictionaries, recurse to allow fine-grained filtering
-            if isinstance(sub_schema, dict) and isinstance(data[key], dict):
-                result[key] = apply_schema(data[key], sub_schema)
-            else:
-                if sub_schema:
-                    # Leaf node: Return the data found at this key
-                    result[key] = data[key]
+    
+    for key, value in data.items():
+        # --- 1. Handle "Default Allow" Keys (Prefix '+') ---
+        if isinstance(key, str) and key.startswith('+'):
+            clean_key = key[1:] # Strip '+'
+            
+            # Check if schema explicitly BANS this key
+            # If clean_key is NOT in schema, we keep it (Default True)
+            # If clean_key IS in schema, we obey the schema (True/False)
+            if schema.get(clean_key, True) is not False:
+                result[clean_key] = value
+            continue
+
+        # --- 2. Handle Standard Keys ---
+        if key in schema:
+            sub_schema = schema[key]
+            
+            # Recurse for nested dicts
+            if isinstance(sub_schema, dict) and isinstance(value, dict):
+                result[key] = apply_schema(value, sub_schema)
+            
+            # Keep if True
+            elif sub_schema:
+                result[key] = value
+                
     return result
 
+from enum import Enum, auto
+
+class TaskType(Enum):
+    OBJECTNAV = auto()  # RGB + Object Category ID
+    VLN = auto()        # RGB + Instruction Text (R2R/RxR)
+    IMAGENAV = auto()   # RGB + Goal Image
+    GENERIC = auto()    # PointNav or unknown
 
 def save_run_video(steps_data, filename, output_dir, fps=4, quality=6,return_thumbnail=True):
     """
@@ -86,10 +117,10 @@ def save_run_video(steps_data, filename, output_dir, fps=4, quality=6,return_thu
         [
             f"episode: {steps_data['info'][0]['episode_label']} step: {idx}",
             action_list[int(action)],
-            f"distance_to_goal: {info['distance_to_goal']}",
-            f"distance_reward: {info['distance_to_goal_reward']}",
-            f"goal: {obs['goal_name']}",
-            f"spl: {steps_data['info'][-1]['spl']}",
+            f"distance_to_goal: {info.get('distance_to_goal',None)}",
+            f"distance_reward: {info.get('distance_to_goal_reward',None)}",
+            f"goal: {obs['instr_or_goal']}",
+            f"spl: {steps_data['info'][-1].get('spl',None)}",
         ]
         for idx, (action, obs, info) in enumerate(zip(actions, steps_data['obs'], steps_data['info']))
     ]
@@ -109,20 +140,20 @@ def save_run_video(steps_data, filename, output_dir, fps=4, quality=6,return_thu
 
     return os.path.join(output_dir, filename + ".mp4")
 
-summary_schema = {
-    "episode_label":True, 
-    "scene_id":True, #redundant, but convenient for scene based analysis
-    "spl":True,
-    "distance_to_goal":True,
-    "soft_spl":True,
-    "success":True,
-}
+# summary_schema = {
+#     "episode_label":True, 
+#     "scene_id":True, #redundant, but convenient for scene based analysis
+#     "spl":True,
+#     "distance_to_goal":True,
+#     "soft_spl":True,
+#     "success":True,
+# }
 
 default_logging_schema = {
     # 1. Observation: Keep only RGB and Goal Name (for text overlay)
     "obs": {
         "rgb": True,
-        "goal_name": True,
+        "instr_or_goal": True,
         "patch_coords": True
     },
     
@@ -194,7 +225,7 @@ def supplementary_logging_helper(episode_data,result_row):
                 print(f"Failed to reduce user key {key}: {e}")
                 continue
 
-def habitat_logging_helper(episode_data):
+def habitat_logging_helper(episode_data,summary_schema):
     '''
     Docstring for habitat_logging_helper
     
@@ -205,12 +236,13 @@ def habitat_logging_helper(episode_data):
     - sequence_logs dictionary of lists/arrays for granular sequence data
     '''
     episode_logs = apply_schema(episode_data['info'][-1],summary_schema) 
+
     #TODO: check safety. does habitat change the internal episode the moment step(stop) is called? if so, we are in trouble
     # safety overrides for now, using first step guarantees correctness
     episode_logs['episode_label'] = episode_data['info'][0]['episode_label']
     episode_logs['episode_id'] = episode_data['info'][0]['episode_id']
     episode_logs['scene_id'] = episode_data['info'][0]['scene_id']
-    episode_logs['goal'] = episode_data['obs'][0]['goal_name'] #need this for obvious reasons
+    episode_logs['goal'] = episode_data['obs'][0]['instr_or_goal'] #need this for obvious reasons
 
     episode_logs['n_steps'] = len(episode_data['action'])
     episode_logs['duration'] = episode_data['timestamp'][-1]-episode_data['timestamp'][0]
@@ -265,7 +297,8 @@ class HabitatWorker:
             TopDownMapMeasurementConfig,
             FogOfWarConfig,
         )
-        from habitat import Env, make_dataset
+        import utils.measures
+        from habitat import make_dataset
         """
         assigned_episode_labels: List of strings ['scene_id_episode_id', ...] specific to this worker.
         enable_caching: If True, stores observations for video generation.
@@ -280,12 +313,10 @@ class HabitatWorker:
         self.enable_caching = enable_caching
         if enable_caching:
             self.steps = defaultdict(list)
-            if logging_schema is None:
-                self.logging_schema = default_logging_schema
-            else:
-                self.logging_schema = logging_schema
 
+        self.logging_schema = logging_schema
         self.output_schema = output_schema
+
         self.logging_actor = None
 
         self.fn_guard = fn_guard
@@ -294,6 +325,7 @@ class HabitatWorker:
         self.voxel_kwargs = voxel_kwargs
         # --- Initialize Config & Env ---
         self.config_env = get_config(config_path)
+
         with read_write(self.config_env):
         # --- OVERRIDE PATHS IF PROVIDED ---
             if dataset_path:
@@ -316,7 +348,7 @@ class HabitatWorker:
                     draw_shortest_path=True,
                     draw_view_points=True,
                     draw_border=True,
-                    fog_of_war=FogOfWarConfig(draw=True, visibility_dist=5, fov=72),
+                    fog_of_war=FogOfWarConfig(draw=True, visibility_dist=5, fov=79),
                 )
             )
 
@@ -333,8 +365,86 @@ class HabitatWorker:
             print("skipping sim initialization since no shards provided, please call assign_shard")
             self.episode_counter = 0
             self.shard_length = 0
+
+    def _resolve_task_specific_logic(self):
+        """
+        rigorously detects the TaskType by inspecting the observation space 
+        and configuring the worker's goal abstraction layer.
+        """
+        # 1. Safe Observation Space Access
+        if hasattr(self.env, "observation_space"):
+            obs_space = self.env.observation_space
+        elif hasattr(self.env, "habitat_env"):
+            obs_space = self.env.habitat_env.observation_space
+        else:
+            print("[Worker] Warning: No observation space found. Defaulting to GENERIC.")
+            self.task_type = TaskType.GENERIC
+            self._get_instr_or_goal = lambda obs: "N/A"
+            return
+
+        self.sensors = obs_space.spaces.keys()
+        if hasattr(self.env, "habitat_env"):
+            self.measures = self.env.habitat_env.task.measurements.measures
+        else:
+            self.measures = self.env.unwrapped.habitat_env.task.measurements.measures
+        # 2. Strict Detection Logic
+        if "objectgoal" in self.sensors:
+            self.task_type = TaskType.OBJECTNAV
+            self._goal_key = "objectgoal"
+            self._setup_objectnav_mapping()
+
+        elif "instruction" in self.sensors or "rxr_instruction" in self.sensors:
+            self.task_type = TaskType.VLN
+            self._goal_key = "instruction" if "instruction" in self.sensors else "rxr_instruction"
+            # VLN goals are just the instruction text (or tokens)
+            self._get_instr_or_goal = self._format_vln_goal
+
+        elif "imagegoal" in self.sensors or "instance_imagegoal" in self.sensors:
+            self.task_type = TaskType.IMAGENAV
+            self._goal_key = "imagegoal"
+            self._get_instr_or_goal = lambda obs: "[Pixel Goal]"
+
+        else:
+            self.task_type = TaskType.GENERIC
+            self._goal_key = None
+            self._get_instr_or_goal = lambda obs: "PointGoal" if "pointgoal_with_gps_compass" in self.sensors else "N/A"
+
+        print(f"[Worker] Task Resolved: {self.task_type.name} (Goal Key: {self._goal_key})")
+
+    # --- Type-Specific Helpers (Cleaner than messy Lambdas) ---
+    def _setup_objectnav_mapping(self):
+        """Pre-computes the ID->Name mapping for ObjectNav to avoid lag."""
+        try:
+            dataset = self.env.habitat_env._dataset
+            if hasattr(dataset, "category_to_task_category_id"):
+                mapping = dataset.category_to_task_category_id
+                # Invert: {'chair': 0} -> {0: 'chair'}
+                self._id_to_name = {v: k for k, v in mapping.items()}
+                
+                self._get_instr_or_goal = lambda obs: self._id_to_name.get(
+                    obs['objectgoal'].item() if hasattr(obs['objectgoal'], 'item') else obs['objectgoal'][0],
+                    f"Obj {obs['objectgoal']}"
+                )
+            else:
+                raise("failed to map object id to goal name")
+        except (AttributeError, KeyError):
+            self._get_instr_or_goal = lambda obs: f"ObjID: {obs['objectgoal']}"
+
+    def _format_vln_goal(self, obs):
+        """Safe formatter for R2R/RxR instructions."""
+        val = obs[self._goal_key]
+        # If it's a string, return it. If it's token IDs, return placeholder.
+        if isinstance(val, str):
+            return val
+        elif isinstance(val,dict):
+            return val['text']
+        else:
+            raise TypeError(f"Instruction must be str, got {type(val)}")
+    def total_episodes(self):
+        return self.full_dataset.num_episodes
     def assign_shard(self,assigned_episode_labels = None):
         from habitat.core.dataset import EpisodeIterator
+        import utils.measures
         from habitat.gym import make_gym_from_config
         
         if hasattr(self, 'env') and self.env is not None:
@@ -366,6 +476,7 @@ class HabitatWorker:
         # self.env = Env(self.config_env, dataset)
         with suppress_cpp_output():
             self.env = make_gym_from_config(self.config_env,dataset)
+            self._resolve_task_specific_logic() # dependent on the env, so use here
         # self.env = make_gym_from_config(self.config_env,dataset)
         if self.ep_seed is not None:
             seed = self.ep_seed
@@ -382,6 +493,12 @@ class HabitatWorker:
             seed=seed,
             max_scene_repeat_episodes=4
         )
+        if self.output_schema is None:
+            self.output_schema = self._generate_auto_schema(True)
+        if self.logging_schema is None:
+            self.logging_schema = self._generate_auto_schema(True)
+        self.summary_schema=self._generate_auto_schema()['info']
+
         print(f"Actor assigned with shard of {len(dataset.episodes)} episodes.")
 
 
@@ -396,16 +513,20 @@ class HabitatWorker:
             supplementary logs: dict of extra info to log for this step. useful for recording action logprobs, agent inference latency, etc
                 - WARNING: if you provide this, you MUST provide it every step, with the same keys. otherwise your data won't align properly!
         """
-        last_distance = self.last_step['info']['distance_to_goal']
-        extras = {'fp_stop':-1*int(not self.fp_guard),'fn_stop':-1*int(not self.fn_guard)} # -1 for not enabled, 0 for enabled but not triggerd.
+
+        extras = {'+fp_stop':-1*int(not self.fp_guard),'+fn_stop':-1*int(not self.fn_guard)} # -1 for not enabled, 0 for enabled but not triggerd.
         # oracle stop guards useful for reducin eval noise. #TODO: use habitat config instead of magic number
-        if self.fp_guard and action==0 and last_distance > 0.1:
-            action = np.random.choice([1,2,3]) #chose random non stop action
-            extras['fp_stop'] = 1 #record the false positive incident
-        if last_distance<0.1 and action!=0:
-            if self.fn_guard: 
-                action = 0
-            extras['fn_stop'] = 1
+        try:
+            last_distance = self.last_step['info']['distance_to_goal']
+            if self.fp_guard and action==0 and last_distance > 0.1:
+                action = np.random.choice([1,2,3]) #chose random non stop action
+                extras['+fp_stop'] = 1 #record the false positive incident
+            if last_distance<0.1 and action!=0:
+                if self.fn_guard: 
+                    action = 0
+                extras['+fn_stop'] = 1
+        except:
+            print("warning! cannot calculate collisions!")
         import time
         # t0 = time.time()
         obs, reward, done, info = self.env.step(action)      
@@ -421,8 +542,8 @@ class HabitatWorker:
 
         if self.postprocess:
             step_dict = self._postprocess_step(step_dict)
-            extras['stuck'] = np.linalg.norm(np.array(self.last_step['info']['pos_rots'])-np.array(step_dict['info']['pos_rots']))<1e-5 # record collisions
-            if extras['stuck']:
+            extras['+stuck'] = np.linalg.norm(np.array(self.last_step['info']['+pos_rots'])-np.array(step_dict['info']['+pos_rots']))<1e-5 # record collisions
+            if extras['+stuck']:
                 print("applying collision penalty")
                 step_dict['reward']-=0.05
         if self.enable_caching:
@@ -437,11 +558,11 @@ class HabitatWorker:
                     for k, v in supplementary_logs.items()
                 }
             
-            self._cache_step(self._apply_schema(step_dict,self.logging_schema) | supplementary_logs | extras)
+            self._cache_step(self._apply_schema(step_dict | extras,self.logging_schema) | supplementary_logs )
             self.steps['action'].append(action)
         self.last_step = step_dict
         # print(f"postprocessing took {time.time()-t0}")
-        return self._apply_schema(step_dict |extras,self.output_schema)
+        return self._apply_schema(step_dict | extras,self.output_schema)
 
     def get_last_step(self,output_schema=None):
         """Returns the current observation without stepping the environment."""
@@ -477,10 +598,10 @@ class HabitatWorker:
         self.episode_counter+=1
         # Calling reset() now loads 'current_episode'
         step_dict = {
-        "obs":obs,
-        "reward": 0,
-        "done": False,
-        "info": info
+            "obs":obs,
+            "reward": 0,
+            "done": False,
+            "info": info
         }
         if self.postprocess:
             step_dict = self._postprocess_step(step_dict)
@@ -512,43 +633,20 @@ class HabitatWorker:
             return self.env.get_metrics()
         return {}
 
-    def _get_goal_name(self, goal_index):
-        """
-        Decodes the integer objectgoal from the observation into a string.
-        """
-        # In Habitat ObjectNav, the goal index maps to a list of categories 
-        # defined in the dataset config/mapping.
-        # We can access the mapping via the task's dataset.
-        
-        # Access the underlying dataset attribute mapping
-        # Note: 'category_to_task_category_id' maps Name -> ID. We need the reverse.
-        if not hasattr(self, '_id_to_category_name'):
-            # Build the cache once
-            dataset = self.env.habitat_env._dataset
-            mapping = dataset.category_to_task_category_id
-            self._id_to_category_name = {v: k for k, v in mapping.items()}
-        
-        # Handle scalar or single-element array input
-        if hasattr(goal_index, 'item'):
-            goal_index = goal_index.item()
-            
-        return self._id_to_category_name.get(goal_index, f"Unknown({goal_index})")
-
     def is_exhausted(self):
         return self.episode_counter >= self.shard_length
 
     def _postprocess_step(self,step_dict):
         obs = step_dict['obs']
         info = step_dict['info']
-        if 'objectgoal' in obs:
-            obs['goal_name'] = self._get_goal_name(obs['objectgoal'])
-        
+        obs['+instr_or_goal'] = self._get_instr_or_goal(obs)
+        obs['+curr_step'] = len(self.steps['action'])
         if self.env.habitat_env.sim:
             state = self.env.habitat_env.sim.get_agent_state()
             pos = state.position  # Vector3
             rot = state.rotation  # Quaternion
 
-            info['pos_rots'] = [
+            info['+pos_rots'] = [
                 float(pos[0]), float(pos[1]), float(pos[2]),      # x, y, z
                 float(rot.x), float(rot.y), float(rot.z), # qx, qy, qz
                 float(rot.w)                                 # w
@@ -556,13 +654,13 @@ class HabitatWorker:
             if self.voxel_kwargs is not None:
                 from utils.bev_utils import get_patch_coords
                 H,W = step_dict['obs']['depth'].shape[:2] 
-                obs['patch_coords'] = get_patch_coords(np.array([info['pos_rots']]),step_dict['obs']['depth'].reshape((1,H,W)),**self.voxel_kwargs)[0] # 1 by H by W by 3 patch coords
-        info['scene_id']=get_scene_id(self.env.current_episode().scene_id)
-        info['episode_id']=self.env.current_episode().episode_id
-        info['episode_label']=f"{info['scene_id']}_{info['episode_id']}"
+                obs['+patch_coords'] = get_patch_coords(np.array([info['+pos_rots']]),step_dict['obs']['depth'].reshape((1,H,W)),**self.voxel_kwargs)[0] # 1 by H by W by 3 patch coords
+        info['+scene_id']=get_scene_id(self.env.current_episode().scene_id)
+        info['+episode_id']=self.env.current_episode().episode_id
+        info['+episode_label']=f"{info['+scene_id']}_{info['+episode_id']}"
         curr_idx = self.episode_counter-1
-        info['epoch']= curr_idx // self.shard_length
-        info['step_in_epoch']=curr_idx % self.shard_length
+        info['+epoch']= curr_idx // self.shard_length
+        info['+step_in_epoch']=curr_idx % self.shard_length
         # 2. Provide Semantic Mapping (ID -> Label), too expensive, should just request once instead of always send.
         # The driver can now map any pixel in obs['semantic'] to a string.
         # if 'semantic' in obs:
@@ -606,8 +704,73 @@ class HabitatWorker:
         return mapping
 
     def _apply_schema(self,data,schema):
+        # return apply_schema_permissive(data,schema)
         return apply_schema(data,schema)
     
+    def _generate_auto_schema(self, include_arrays=False):
+        """
+        Introspects the environment to build a schema automatically.
+        
+        Policy:
+        - Obs: Drop all tensors > 1D (RGB, Depth, Maps) unless include_arrays=True.
+                Keep all scalars/vectors (GPS, Compass, Instructions).
+        - Info: Keep all registered metrics (SPL, Success) EXCEPT 'top_down_map'.
+        """
+        # 1. Introspect Observations
+        # Handle the Gym wrapper layers to get the real space
+        if hasattr(self.env, "observation_space"):
+            obs_space = self.env.observation_space
+        elif hasattr(self.env, "habitat_env"):
+            obs_space = self.env.habitat_env.observation_space
+            
+        obs_schema = {}
+        for sensor_name, space in obs_space.spaces.items():
+            # Heuristic: If it has 2+ dims (H, W, C), it's likely an image -> Drop it.
+            # If it is 1D (D,) or Scalar (), it's likely metadata -> Keep it.
+            try:
+                is_heavy_tensor = len(space.shape) >= 2
+                
+                if is_heavy_tensor and not include_arrays:
+                    obs_schema[sensor_name] = False
+                else:
+                    obs_schema[sensor_name] = True
+            except:
+                obs_schema[sensor_name] = True
+                # print(f"failed with {sensor_name}")
+        # 2. Introspect Metrics (Info)
+        info_schema = {}
+        # We need access to the underlying Habitat Task to see registered measures
+        # Try different access patterns depending on if we are wrapped
+        try:
+            if hasattr(self.env, "habitat_env"):
+                measures = self.env.habitat_env.task.measurements.measures
+            else:
+                measures = self.env.unwrapped.habitat_env.task.measurements.measures
+            
+            for measure_name in measures.keys():
+                # Special Case: TopDownMap is a heavy dictionary containing a large array.
+                # Default to False to save bandwidth.
+                if measure_name == "top_down_map" and not include_arrays:
+                    info_schema[measure_name] = False 
+                else:
+                    info_schema[measure_name] = True
+        except AttributeError:
+            # Fallback if we can't reach the task (unlikely in standard Habitat)
+            print("[AutoSchema] Warning: Could not detect metrics. Defaulting to empty info.")
+
+        # 3. Construct Final Schema
+        return {
+            "obs": {**obs_schema,"instr_or_goal": True},
+            "info": info_schema,
+            # Always keep these primitives
+            "action": True,
+            "reward": True,
+            "done": True,
+            "timestamp": True,
+            "fp_stop": True,
+            "fn_stop": True,
+            "stuck": True
+        }
     def close(self):
         """Close environment"""
         if self.env is not None:
@@ -684,7 +847,7 @@ class LoggingHabitatWorker(HabitatWorker):
 
         # 2. Calculate Metrics & Split Data
         # Returns scalars (episode_logs) and raw lists (sequence_logs)
-        episode_logs, sequence_logs = habitat_logging_helper(self.steps)
+        episode_logs, sequence_logs = habitat_logging_helper(self.steps,self.summary_schema)
     
         # 3. Generate & Save Video + Thumbnail
         # Uses your helper. Returns (video_path_string, PIL_Image)
@@ -721,7 +884,7 @@ class LoggingHabitatWorker(HabitatWorker):
             return str(obj)
 
         with open(seq_path, 'w') as f:
-            json.dump(sequence_logs, f, default=default_serializer)
+            json.dump(sequence_logs, f, default=default_serializer,indent=4)
 
         with open(os.path.join(self.log_dir,f"results_{os.getpid()}"),'a') as f:
             f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result

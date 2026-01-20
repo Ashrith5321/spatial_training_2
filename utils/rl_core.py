@@ -429,7 +429,15 @@ def compute_reinforce_plus_plus_distance_kernel_advantage(
         kernel_sigma_meters = 0.5
         if config.distance_kernel_sigma is not None:
             kernel_sigma_meters = config.distance_kernel_sigma 
-        
+        dul,dulq = 0,0 #zero init
+        if config.distance_clip_max is not None:
+            dul = config.distance_clip_max
+        if config.distance_clip_percentile is not None:
+            dulq = torch.quantile(distances, config.distance_clip_percentile)
+        dul = max(dul,dulq)
+        if dul>1e-5:
+            distances = torch.clamp(distances,max=dul)
+            print(f"using distance upper limit {dul}")
         # Convert sigma from meters to bins
         sigma_bins = kernel_sigma_meters / bin_resolution
         kernel_size = int(8 * sigma_bins) + 1 # 8 sigma coverage
@@ -466,8 +474,8 @@ def compute_reinforce_plus_plus_distance_kernel_advantage(
         pad = kernel_size // 2
         
         # Use replicate padding to handle boundaries (0m and Max Distance) gracefully
-        padded_sum = F.pad(input_sum, (pad, pad), mode='replicate')
-        padded_count = F.pad(input_count, (pad, pad), mode='replicate')
+        padded_sum = F.pad(input_sum, (pad, pad), mode=config.distance_pad_mode, value=config.distance_pad_val) #'constant', "replicate"
+        padded_count = F.pad(input_count, (pad, pad), mode=config.distance_pad_mode, value=config.distance_pad_val)
         
         smoothed_sum = F.conv1d(padded_sum, kernel)
         smoothed_count = F.conv1d(padded_count, kernel)
@@ -475,8 +483,6 @@ def compute_reinforce_plus_plus_distance_kernel_advantage(
         # E. Compute Baseline Table
         # Baseline[bin] = Avg Return for that distance
         baseline_table = smoothed_sum / (smoothed_count + 1e-8) # (1, 1, num_bins)
-        if config.baseline_offset is not None:
-            baseline_table+=config.baseline_offset
         baseline_table = baseline_table.view(-1) # (num_bins,)
         
         # F. Project back to Token Space (Gather)
@@ -544,6 +550,16 @@ def compute_reinforce_plus_plus_distance_kernel_var_norm_advantage(
         kernel_sigma_meters = 0.5 
         if config.distance_kernel_sigma is not None:
             kernel_sigma_meters = config.distance_kernel_sigma 
+        dul,dulq = 0,0 #zero init
+        if config.distance_clip_max is not None:
+            dul = config.distance_clip_max
+        if config.distance_clip_percentile is not None:
+            dulq = torch.quantile(distances, config.distance_clip_percentile)
+        dul = max(dul,dulq)
+        if dul>1e-5:
+            distances = torch.clamp(distances,max=dul)
+            print(f"using distance upper limit {dul}")
+
         sigma_bins = kernel_sigma_meters / bin_resolution
 
         kernel_size = int(6 * sigma_bins) + 1 
@@ -574,7 +590,7 @@ def compute_reinforce_plus_plus_distance_kernel_var_norm_advantage(
         # Pad and Convolve all three statistics
         # Note: We group operations for efficiency
         stacked_inputs = torch.stack([bin_sum, bin_sq_sum, bin_count]).unsqueeze(0) # (1, 3, bins)
-        padded_inputs = F.pad(stacked_inputs, (pad, pad), mode='replicate')
+        padded_inputs = F.pad(stacked_inputs, (pad, pad), mode=config.distance_pad_mode, value=config.distance_pad_val)
         
         # We need a grouped convolution or just loop. Since it's only 3 channels, 
         # using groups=1 with repeated kernel is easy, or just simple loop.

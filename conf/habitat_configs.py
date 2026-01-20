@@ -9,7 +9,7 @@ cs.store(name="voxel",group="sim", node=HabitatConfig(
         "fov_degrees": 79
     }, #set to none for standard mode
     output_schema={
-        "obs": {"rgb": True, "goal_name": True, "patch_coords": False},
+        "obs": {"rgb": True, "instr_or_goal": True, "patch_coords": False},
         "info": {"episode_label": True, "spl": True, "success": True},
         "done": True,
     }
