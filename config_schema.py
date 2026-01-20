@@ -72,6 +72,8 @@ class RLAlgoConfig:
     distance_kernel_sigma: float = 0.5
     distance_clip_max: Optional[float] = 17.0
     distance_clip_percentile: Optional[float] = 0.95
+    distance_pad_mode: Optional[str] = "replicate"
+    distance_pad_val: Optional[float] = None
     # Value & Entropy
     cliprange_value: float = 0.2
     entropy_bonus: float = 0.0

@@ -474,8 +474,8 @@ def compute_reinforce_plus_plus_distance_kernel_advantage(
         pad = kernel_size // 2
         
         # Use replicate padding to handle boundaries (0m and Max Distance) gracefully
-        padded_sum = F.pad(input_sum, (pad, pad), mode='constant', value=0)
-        padded_count = F.pad(input_count, (pad, pad), mode='constant', value=0)
+        padded_sum = F.pad(input_sum, (pad, pad), mode=config.distance_pad_mode, value=config.distance_pad_val) #'constant', "replicate"
+        padded_count = F.pad(input_count, (pad, pad), mode=config.distance_pad_mode, value=config.distance_pad_val)
         
         smoothed_sum = F.conv1d(padded_sum, kernel)
         smoothed_count = F.conv1d(padded_count, kernel)
@@ -590,7 +590,7 @@ def compute_reinforce_plus_plus_distance_kernel_var_norm_advantage(
         # Pad and Convolve all three statistics
         # Note: We group operations for efficiency
         stacked_inputs = torch.stack([bin_sum, bin_sq_sum, bin_count]).unsqueeze(0) # (1, 3, bins)
-        padded_inputs = F.pad(stacked_inputs, (pad, pad), mode='constant', value=0)
+        padded_inputs = F.pad(stacked_inputs, (pad, pad), mode=config.distance_pad_mode, value=config.distance_pad_val)
         
         # We need a grouped convolution or just loop. Since it's only 3 channels, 
         # using groups=1 with repeated kernel is easy, or just simple loop.
