@@ -344,7 +344,7 @@ class RLRayWorker(RLWorker):
             }
         )
 
-    def train_dagrl_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch,rl_weight=1.0,bc_weight=0.05):
+    def train_dagrl_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch,rl_weight=1.0,bc_weight=0.1):
         """
         Hybrid Step: PPO + DAgger.
         Assumes the driver has populated 'response_mask' (for PPO) and 

@@ -180,9 +180,20 @@ def main(cfg: RLConfig):
                         global_idx = perm_indices[global_idx]
                         # Access the specific inputs and the sliced TensorDict for this index
                         # We use global_idx to ensure we pull the correct corresponding data
+                        # Note: We must cast to bool to ensure logical OR works if they are ints
+                        full_valid_mask = (traj_batch['response_mask'][global_idx] | traj_batch['dagger_mask'][global_idx]).bool()
+                        
+                        # 2. Calculate the actual unpadded length of this trajectory
+                        valid_length = full_valid_mask.sum().item()
+                        
+                        # 3. Slice the batch row to remove padding. 
+                        # This ensures shape(mask) == shape(logits) inside the worker.
+                        sliced_batch = traj_batch[global_idx : global_idx + 1, :valid_length]
+
+                        # 4. Dispatch
                         ref = trainer.train_dagrl_step.remote(
                                 *model_inputs[global_idx], 
-                                traj_batch[global_idx : global_idx + 1, traj_batch['response_mask'][global_idx].bool()]
+                                sliced_batch
                             )
                         step_futures.append(ref)
                     training_futures.extend(step_futures)
@@ -200,9 +211,19 @@ def main(cfg: RLConfig):
                     global_idx = perm_indices[global_idx]
                     # Access the specific inputs and the sliced TensorDict for this index
                     # We use global_idx to ensure we pull the correct corresponding data
+                    full_valid_mask = (traj_batch['response_mask'][global_idx] | traj_batch['dagger_mask'][global_idx]).bool()
+                    
+                    # 2. Calculate the actual unpadded length of this trajectory
+                    valid_length = full_valid_mask.sum().item()
+                    
+                    # 3. Slice the batch row to remove padding. 
+                    # This ensures shape(mask) == shape(logits) inside the worker.
+                    sliced_batch = traj_batch[global_idx : global_idx + 1, :valid_length]
+
+                    # 4. Dispatch
                     ref = trainer.train_dagrl_step.remote(
                             *model_inputs[global_idx], 
-                            traj_batch[global_idx : global_idx + 1]
+                            sliced_batch
                         )
                     step_futures.append(ref)
                     future_metadata[ref] = global_idx
