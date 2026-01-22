@@ -39,7 +39,7 @@ vlm:
 sim:
   config_path: configs/objectnav_hm3d_rgbd_semantic.yaml
   workspace: /Projects/SG_VLN_HumanData/SG-VLN
-  scenes_dir: null
+  scenes_s: null
   split: train_mini
   fp_guard: false
   fn_guard: false

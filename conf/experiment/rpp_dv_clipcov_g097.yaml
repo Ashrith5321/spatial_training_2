@@ -1,27 +1,20 @@
 # @package _global_
 task:
-  run_name: rpp_t_clipcov_llr_new
+  run_name: rpp_dv_clipcov
   wandb_project: rl_dev
   shard_size: 0
   jobtype: train
-  output_dir: /home/huyu/scratch/qixin/rl_training/dump/rl_training
 resources:
-  ray_address: '10.164.33.175:6379'
-  object_spilling_directory: /caches/ray_object_spilling
   vlm_resource_tag: env_a
   sim_resource_tag: env_b
-  master_addr: localhost
-  master_port: null
-  num_vlms: 4
-  num_sims: 5
-  vlm_conda_env: null
-  habitat_conda_env: null
+  num_vlms: 3
+  num_sims: 4
   vlm_gpu_fraction: 0.7
   sim_gpu_fraction: 0.14
   vlm_cpus: 4
   sim_cpus: 4
 rollout:
-  max_steps: 350
+  max_steps: 400
   temperature: 1.0
   action_space_str: '[stop, forward, left, right, up, down]'
   system_prompt: ${read_text:conf/prompts/objectnav_prompt.txt}
@@ -39,16 +32,15 @@ vlm:
   save_outputs: true
 sim:
   config_path: configs/objectnav_hm3d_rgbd_semantic.yaml
-  workspace: /scratch/mcity_project_root/mcity_project/huyu/qixin
-  scenes_dir: null
   split: train
+  scenes_dir: null
   fp_guard: false
   fn_guard: false
   voxel_kwargs: null
   output_schema:
     obs:
       rgb: true
-      instr_or_goal: true
+      goal_name: true
       patch_coords: false
     info:
       episode_label: true
@@ -64,11 +56,12 @@ training:
   checkpoint: null
   load_optim: false
   load_sched: false
-  learning_rate: 2.0e-06
-  grad_accum_steps: 1
+  learning_rate: 1.5e-06
+  grad_accum_steps: 3
   mixed_precision: 'no'
   gradient_checkpointing: true
   total_optimization_steps: 20000
+  warmup_steps: 48
   save_step: 8
   peft_config:
     r: 128
@@ -87,9 +80,10 @@ training:
     modules_to_save: null
   rl_config:
     use_value: false
-    advantage_estimator: reinforce_plus_plus_geometric_time_aware
+    advantage_estimator: reinforce_plus_plus_distance_kernel_var_norm
+    distance_kernel_sigma: 0.5
     policy_loss_name: clip_cov
-    n_rollout: 16
+    n_rollout: 12
     n_adv: 256
     n_epoch: 2
     clip_ratio: 0.2
@@ -100,10 +94,10 @@ training:
       clip_cov_ratio: 0.0002
       clip_cov_ub: 5.0
       clip_cov_lb: 1.0
-    gamma: 0.95
-    lam: 0.95
+    gamma: 0.97
+    lam: 0.97
     cliprange_value: 0.2
-    entropy_bonus: 0.003
+    entropy_bonus: 0.00
     use_ref: true
     kl_coeff: 0.001
     kl_target: 0.1

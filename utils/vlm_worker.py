@@ -903,7 +903,7 @@ class VLMTrainingMixin:
         torch.save(self.scheduler.state_dict(), os.path.join(path, "scheduler.pt"))
         print(f"✅ Checkpoint saved to: {path}")
 
-    def load_checkpoint(self, path, strict_base_check=True,load_optim=True,load_sched=True):
+    def load_checkpoint(self, path, strict_base_check=True,load_optim=True,load_sched=False):
         """
         Resumes training state fully. 
         Must be called AFTER setup_training().
@@ -941,7 +941,7 @@ class VLMTrainingMixin:
         if os.path.exists(sched_path) and load_sched:
             print("loading scheduler!")
             sched_state = torch.load(sched_path, map_location=self.accelerator.device)
-            self.scheduler.load_state_dict(sched_state)
+            self.scheduler.load_state_dict(sched_state,weights_only=True)
             print(" -> Scheduler loaded.")
 
 class DataGenerator:
