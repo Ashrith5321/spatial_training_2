@@ -768,7 +768,133 @@ class VLMTrainingMixin:
         seq_inputs = {k:v.to('cuda') for k,v in rl_seq_inputs.items()}
         output = self.model(**seq_inputs)
         return output.logits
+    
+    def _setup_training(self):
+        self.ddp_model.train()
+        if self.is_merged():
+            self.unmerge_adapter()
+        if self.gradient_checkpointing:
+            self.model.gradient_checkpointing_enable({"use_reentrant": False})
+        self.reset() #clear internal state, training is (mostly) stateless
+        self.accelerator.wait_for_everyone() # ensure all workers have unmerged before training
+        
+    def _training_forward(self,embeds_inputs):
+        # Forward via DDP wrapper (triggers sync)
+        logits,vpreds = self.ddp_model(embeds_inputs = embeds_inputs,compute_values = self.rl_algo_config.use_value,value_grad_scale=self.rl_algo_config.value_grad_scale)
+        return logits,vpreds 
+    
+    def rl_loss(self, log_probs, actions, advantages, response_mask, old_log_prob, returns, old_values, vpreds, logits, rollout_log_probs=None, ref_log_probs=None):        
+        from verl.trainer.ppo.core_algos import compute_value_loss,compute_entropy_loss
+        #TODO: rollout correction, rejection sampling to exclude bad tokens
+        log_prob = torch.gather(log_probs, -1, actions.unsqueeze(-1).to(log_probs.device)).squeeze(-1)
+        response_mask = response_mask.to(log_prob.device)
+        pg_loss,metrics = self.policy_loss_fn(old_log_prob=old_log_prob.to(log_prob.device),log_prob=log_prob,advantages=advantages.to(log_prob.device),response_mask=response_mask,config = self.rl_algo_config)
+        metrics['loss/pg_loss'] = pg_loss.detach().item()
+        metrics['return'] = torch.amax(returns).detach().item()
+        if self.rl_algo_config.use_value:
+            value_loss,vf_clipfrac = compute_value_loss(vpreds,returns.to(log_prob.device),old_values.to(log_prob.device),response_mask,self.rl_algo_config.cliprange_value)
+            loss = pg_loss + value_loss
+            metrics['critic/vf_clipfrac'] = vf_clipfrac.detach().item()
+            metrics['train/vf_loss'] = value_loss.detach().item()
+            valid_values = torch.masked_select(vpreds, response_mask).cpu()
+            valid_returns = torch.masked_select(returns,response_mask.cpu())
+            return_diff_var = torch.var(valid_returns - valid_values)
+            return_var = torch.var(valid_returns)
+            metrics['critic/explained_variance']=(1.0 - return_diff_var / (return_var + 1e-5)).detach().item()
+        else:
+            loss = pg_loss
 
+        if self.rl_algo_config.entropy_bonus is not None:
+            entropy = compute_entropy_loss(logits,response_mask)
+            entropy_loss = -entropy*self.rl_algo_config.entropy_bonus
+            metrics['train/entropy'] = entropy.detach().item()
+            loss = loss+entropy_loss
+
+        if ref_log_probs is not None and self.rl_algo_config.kl_coeff is not None:
+            kld = compute_full_kl_penalty(log_probs,ref_log_probs.to(log_probs.device))
+            metrics['train/ref_kl_divergence'] = kld.mean().item()
+            loss = loss + (kld * self.rl_algo_config.kl_coeff).mean()
+
+        if rollout_log_probs is not None:
+            kld = compute_full_kl_penalty(log_probs.cpu(),rollout_log_probs.cpu())
+            metrics['train/rollout_kl_divergence'] = kld.mean().item()        
+        return loss,metrics
+    
+    def bc_loss(self, log_probs, expert_actions, dagger_mask, label_smoothing=0.1, **kwargs):
+        """
+        Behavior Cloning / DAgger Loss.
+        """
+        import torch.nn.functional as F
+        
+        # Flatten for CrossEntropyLoss
+        # log_probs: [B, S, Vocab] -> [B*S, Vocab]
+        # expert_actions: [B, S] -> [B*S]
+        
+        # We only want to train on the specific tokens masked for DAgger
+        # (e.g. the 5% worst episodes)
+        active_indices = dagger_mask.view(-1).to(log_probs.device)
+        
+        if not active_indices.any():
+            return torch.tensor(0.0, device=log_probs.device), {}
+
+        flat_log_probs = log_probs.view(-1, log_probs.size(-1))
+        flat_targets = expert_actions.view(-1).to(log_probs.device)
+        
+        logits = kwargs.get('logits')
+        if logits is not None:
+             flat_logits = logits.view(-1, logits.size(-1))
+             loss = F.cross_entropy(
+                flat_logits[active_indices], 
+                flat_targets[active_indices],
+                label_smoothing=label_smoothing
+             )
+        else:
+             # Fallback if only log_probs available (no smoothing easily available)
+             loss = F.nll_loss(
+                flat_log_probs[active_indices], 
+                flat_targets[active_indices]
+             )
+        
+        metrics = {'loss/dagger_loss': loss.detach().item()}
+        
+        # Optional: Scale the loss if needed (usually done in config)
+        return loss, metrics
+    
+    def generic_train_step(self,embeds_inputs,loss_fn_names,loss_kwargs_list,loss_weights=None):
+        '''
+        Generic train step that can be used for both RL, SFT, or any unholy combination thereof
+        '''
+        self._setup_training()
+        # Accumulate gradients (handle micro-batches)
+        with self.accelerator.accumulate(self.ddp_model):
+            loss = torch.tensor(0.0).to(self.device)
+            metrics = {}
+            logits,vpreds = self._training_forward(embeds_inputs)
+            log_probs = self._calculate_action_logprobs(logits) # B by S by N_action space
+            if loss_weights is None:
+                loss_weights = [1.0]*len(loss_fn_names)
+            for loss_fn_name,weight in zip(loss_fn_names,loss_weights):
+                loss_fn = getattr(self, f"{loss_fn_name}_loss")
+                loss_part,metric = loss_fn(log_probs=log_probs,vpreds=vpreds,logits=logits,**loss_kwargs_list[loss_fn_name])
+                loss = loss + loss_part*weight
+                metrics |= metric
+                
+            self.accelerator.backward(loss)
+            # Clip gradients and return the total norm (Global L2)
+            # max_grad_norm is usually 0.5 or 1.0 in PPO papers
+            grad_norm = self.accelerator.clip_grad_norm_(
+                self.ddp_model.parameters(), 
+                max_norm=1.0 
+            )
+            # Log the norm (Detect explosions if this spikes > 10.0)
+            metrics['train/grad_norm'] = grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm
+            
+            self.optimizer.step()
+            self.scheduler.step()
+            metrics['train/lr'] = self.scheduler.get_last_lr()[0]
+            self.optimizer.zero_grad()
+        return metrics
+            
     def train_rl_step(self,embeds_inputs,actions,old_log_prob,advantages,returns=None,old_values=None,rollout_log_probs=None,ref_log_probs=None):
         '''
         Docstring for train_rl_step
@@ -847,7 +973,7 @@ class VLMTrainingMixin:
             # max_grad_norm is usually 0.5 or 1.0 in PPO papers
             grad_norm = self.accelerator.clip_grad_norm_(
                 self.ddp_model.parameters(), 
-                max_norm=1.0 # Add this to your RLAlgoConfig
+                max_norm=1.0 
             )
             # Log the norm (Detect explosions if this spikes > 10.0)
             metrics['train/grad_norm'] = grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm
@@ -903,7 +1029,7 @@ class VLMTrainingMixin:
         torch.save(self.scheduler.state_dict(), os.path.join(path, "scheduler.pt"))
         print(f"✅ Checkpoint saved to: {path}")
 
-    def load_checkpoint(self, path, strict_base_check=True,load_optim=True,load_sched=True):
+    def load_checkpoint(self, path, strict_base_check=True,load_optim=True,load_sched=False):
         """
         Resumes training state fully. 
         Must be called AFTER setup_training().
@@ -941,7 +1067,7 @@ class VLMTrainingMixin:
         if os.path.exists(sched_path) and load_sched:
             print("loading scheduler!")
             sched_state = torch.load(sched_path, map_location=self.accelerator.device)
-            self.scheduler.load_state_dict(sched_state)
+            self.scheduler.load_state_dict(sched_state,weights_only=True)
             print(" -> Scheduler loaded.")
 
 class DataGenerator:

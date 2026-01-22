@@ -23,7 +23,7 @@ resources:
   vlm_cpus: 4
   sim_cpus: 4
 rollout:
-  max_steps: 400
+  max_steps: 300
   temperature: 1.0
   action_space_str: '[stop, forward, left, right, up, down]'
   system_prompt: ${read_text:conf/prompts/objectnav_prompt.txt}
@@ -49,7 +49,7 @@ sim:
   workspace: /Projects/SG_VLN_HumanData/SG-VLN
   scenes_dir: null
   split: val
-  fp_guard: true
+  fp_guard: false
   fn_guard: false
   voxel_kwargs: null
   output_schema:

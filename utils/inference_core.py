@@ -164,7 +164,8 @@ class EpisodeRolloutMixin:
                         "dones": state_dict['done'],
                         "spl": state_dict['info']['spl'],
                         "success": state_dict['info']['success'],
-                        "distance_to_goal": state_dict['info']['distance_to_goal']
+                        "distance_to_goal": state_dict['info']['distance_to_goal'],
+                        "oracle_actions": state_dict['info'].get('oracle_action',-1)
                     }
                     if compute_value:
                         import torch
@@ -246,41 +247,44 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
             inputs = self._pack_inputs()
             self.rl_seq_inputs = inputs
         return habitat_handle,is_exhausted,state_dict,trajectory,inputs,embeds
-    
-    def postprocess_episode(self):
+
+    def postprocess_episode(self,eval=False):
         '''
         clears the internal state and returns the processed trajectory and model inputs.
         - trajectory includes: 
             - rollout logprobs (for rollout correction)
             - old logprobs (calculated from same weights as rollout model but with full forward pass instead of kv cache)
+        If eval is True, skips forward passes and just returns raw trajectory
         '''
         model_inputs = None
-        values = None
-        import torch
-        with torch.no_grad():
-            if self.rl_embeds_inputs is not None:
-                logits,values = self._forward_embeds(self.rl_embeds_inputs,None,self.rl_algo_config.use_value)
-                model_inputs = self.rl_embeds_inputs
-            elif self.rl_seq_inputs is not None:
-                logits,values = self._forward_seq(self.rl_seq_inputs,None,self.rl_algo_config.use_value)
-                model_inputs = self.rl_seq_inputs
-            else:
-                raise ValueError("No stored model inputs found for postprocessing.")
-            logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
-            self.rl_trajectory['old_logprobs'] = logprobs
-            if values is not None:
-                self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
 
-        if self.rl_algo_config.use_ref:
+        if not eval: # skip logprobs calculation during eval for speed.
+            values = None
+            import torch
             with torch.no_grad():
-                self.unmerge_adapter()
-                with self.model.disable_adapter():
-                    if self.rl_embeds_inputs is not None:
-                        logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
-                    elif self.rl_seq_inputs is not None:
-                        logits,values = self._forward_seq(self.rl_seq_inputs,None,False)
-                    ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
-                    self.rl_trajectory['ref_logprobs'] = ref_logprobs
+                if self.rl_embeds_inputs is not None:
+                    logits,values = self._forward_embeds(self.rl_embeds_inputs,None,self.rl_algo_config.use_value)
+                    model_inputs = self.rl_embeds_inputs
+                elif self.rl_seq_inputs is not None:
+                    logits,values = self._forward_seq(self.rl_seq_inputs,None,self.rl_algo_config.use_value)
+                    model_inputs = self.rl_seq_inputs
+                else:
+                    raise ValueError("No stored model inputs found for postprocessing.")
+                logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
+                self.rl_trajectory['old_logprobs'] = logprobs
+                if values is not None:
+                    self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
+
+            if self.rl_algo_config.use_ref:
+                with torch.no_grad():
+                    self.unmerge_adapter()
+                    with self.model.disable_adapter():
+                        if self.rl_embeds_inputs is not None:
+                            logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
+                        elif self.rl_seq_inputs is not None:
+                            logits,values = self._forward_seq(self.rl_seq_inputs,None,False)
+                        ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
+                        self.rl_trajectory['ref_logprobs'] = ref_logprobs
 
         return self.rl_trajectory,model_inputs    
     
@@ -289,8 +293,8 @@ class RLRayWorker(RLWorker):
         habitat_handle,is_exhausted,state_dict,_,_,_ = super().run_episode(habitat_handle, initial_state_ref)
         return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
     
-    def postprocess_episode(self,return_inputs = True):
-        trajectory,model_inputs = super().postprocess_episode()
+    def postprocess_episode(self,return_inputs = True,eval=False):
+        trajectory,model_inputs = super().postprocess_episode(eval=eval)
         if return_inputs:
             inputs_tensors,inputs_metadata = TensorPacker.pack(model_inputs)
             return trajectory,inputs_tensors,inputs_metadata
@@ -308,6 +312,96 @@ class RLRayWorker(RLWorker):
     
         return super().train_rl_step(embeds_inputs, actions, old_log_prob, advantages, returns, old_values, rollout_log_probs,ref_logprobs)
     
+    def train_dagger_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch):
+        """
+        Pure DAgger (Behavior Cloning) Step.
+        """
+        embeds_inputs = TensorPacker.unpack(embeds_inputs_np, embeds_inputs_meta, device=self.accelerator.device)
+        
+        # 1. Prepare Data
+        # Ensure we have the mask (default to all valid tokens if not provided)
+        dagger_mask = traj_batch.get('dagger_mask', traj_batch.get('response_mask', None))
+        if dagger_mask is None:
+            import torch
+             # Fallback: Create a ones mask matching action shape
+            dagger_mask = torch.ones_like(traj_batch['actions'], dtype=torch.bool)
+
+        expert_actions = traj_batch['oracle_actions']
+        # Robustness: Handle One-Hot vs Indices
+        # If input is (B, S, A) probabilities, convert to (B, S) indices
+        if expert_actions.dim() > 2:
+            expert_actions = expert_actions.argmax(dim=-1)
+
+        # 2. Dispatch
+        return super().generic_train_step(
+            embeds_inputs=embeds_inputs,
+            loss_fn_names=['bc'],
+            loss_kwargs_list={
+                'bc': {
+                    'expert_actions': expert_actions,
+                    'dagger_mask': dagger_mask
+                }
+            }
+        )
+
+    def train_dagrl_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch,rl_weight=1.0,bc_weight=0.05):
+        """
+        Hybrid Step: PPO + DAgger.
+        Assumes the driver has populated 'response_mask' (for PPO) and 
+        'dagger_mask' (for BC) to separate the data.
+        """
+        embeds_inputs = TensorPacker.unpack(embeds_inputs_np, embeds_inputs_meta, device=self.accelerator.device)
+        
+        # 1. Unpack RL Args
+        actions = traj_batch['actions']
+        old_log_prob = traj_batch['old_log_prob']
+        advantages = traj_batch['advantages']
+        returns = traj_batch['returns']
+        old_values = traj_batch.get('values', None)
+        rollout_log_probs = traj_batch.get('rollout_logprobs', None)
+        ref_logprobs = traj_batch.get('ref_logprobs', None)
+        
+        # The driver MUST provide this to avoid double-counting gradients
+        # (e.g. response_mask should be FALSE for DAgger samples)
+        rl_mask = traj_batch.get('response_mask') 
+        if rl_mask is None:
+            import torch
+             # Fallback (dangerous for hybrid): Assume all valid tokens are RL
+            rl_mask = torch.ones_like(actions, dtype=torch.bool)
+
+        # 2. Unpack DAgger Args
+        expert_actions = traj_batch['oracle_actions']
+        if expert_actions.dim() > 2:
+            expert_actions = expert_actions.argmax(dim=-1)
+            
+        dagger_mask = traj_batch.get('dagger_mask')
+        if dagger_mask is None:
+            import torch
+            # If missing in hybrid, assume NO DAgger (safety default)
+            dagger_mask = torch.zeros_like(actions, dtype=torch.bool)
+
+        # 3. Dispatch
+        return super().generic_train_step(
+            embeds_inputs=embeds_inputs,
+            loss_fn_names=['rl', 'bc'],
+            loss_kwargs_list={
+                'rl': {
+                    'actions': actions,
+                    'old_log_prob': old_log_prob,
+                    'advantages': advantages,
+                    'returns': returns,
+                    'old_values': old_values,
+                    'rollout_log_probs': rollout_log_probs,
+                    'ref_log_probs': ref_logprobs,
+                    'response_mask': rl_mask
+                },
+                'bc': {
+                    'expert_actions': expert_actions,
+                    'dagger_mask': dagger_mask
+                }
+            },
+            loss_weights=[rl_weight, bc_weight]
+        )
 class HabitatRayWorker(LoggingHabitatWorker):
     """
     Ray Actor wrapper for the LoggingHabitatWorker.
