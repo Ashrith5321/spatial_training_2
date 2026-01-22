@@ -1,6 +1,6 @@
 # @package _global_
 task:
-  run_name: rpp_dv_clipcov_tok-mean-md
+  run_name: rpp_d_clipcov_tok-mean-md-zpad
   wandb_project: rl_dev
   shard_size: 0
   jobtype: train
@@ -31,7 +31,7 @@ vlm:
   use_sparse: true
   save_outputs: true
 sim:
-  config_path: /Projects/configs/configs/objectnav_hm3d_rgbd_semantic.yaml
+  config_path: /Projects/configs/configs/objectnav_hm3d_rgbd_semantic_noisy.yaml
   scenes_dir: null
   fp_guard: false
   fn_guard: false
@@ -49,18 +49,18 @@ sim:
     reward: true
     stuck: true
     fp_stop: true
-  auto_flush: true
+  auto_flush: false
   ep_seed: null
 training:
   checkpoint: Aasdfip/rpp_dv_clipcov-checkpoint_367_1
   load_optim: true
-  load_sched: true
-  learning_rate: 1.5e-06
-  grad_accum_steps: 4
+  load_sched: false
+  learning_rate: 1e-06
+  grad_accum_steps: 2
   mixed_precision: 'no'
   gradient_checkpointing: true
   total_optimization_steps: 10000
-  warmup_steps: 48
+  warmup_steps: 64
   save_step: 8
   peft_config:
     r: 128
@@ -80,10 +80,10 @@ training:
   rl_config:
     use_value: false
     advantage_estimator: reinforce_plus_plus_distance_kernel_var_norm
-    distance_kernel_sigma: 0.7
-    distance_clip_max: 25.0
+    distance_kernel_sigma: 0.5
+    distance_clip_max: 15.0
     distance_clip_percentile: 0.95
-    policy_loss_name: clip_cov
+    policy_loss_name: vanilla
     n_rollout: 16
     n_adv: 256
     n_epoch: 2
@@ -92,15 +92,15 @@ training:
     clip_ratio_high: 0.28
     clip_ratio_c: 3.0
     policy_loss:
-      clip_cov_ratio: 0.0002
+      clip_cov_ratio: 0.00007
       clip_cov_ub: 5.0
       clip_cov_lb: 1.0
-    gamma: 0.97
+    gamma: 0.95
     lam: 0.95
     cliprange_value: 0.2
     entropy_bonus: 0.0
     use_ref: true
-    kl_coeff: 0.001
+    kl_coeff: 0.00
     kl_target: 0.1
     global_batch_info: {}
   sft_config: null

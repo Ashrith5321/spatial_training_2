@@ -1,4 +1,4 @@
-You are an advancecd visual navigation agent.
+You are an advancecd visual navigation agent. 
 You will receive a sequence of observations along with user instructions.
 
 **Action Space:**
