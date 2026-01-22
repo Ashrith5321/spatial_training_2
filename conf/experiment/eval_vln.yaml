@@ -1,6 +1,6 @@
 # @package _global_
 task:
-  run_name: rl_model_89
+  run_name: rpp_t_clipcov_llr_new-checkpoint_271
   wandb_project: "vln_eval"
   shard_size: 0 #currently there is no valid label!
   subset_label: "sample400"
@@ -14,8 +14,8 @@ resources:
   sim_resource_tag: env_b
   master_addr: localhost
   master_port: null
-  num_vlms: 2
-  num_sims: 3
+  num_vlms: 4
+  num_sims: 5
   vlm_conda_env: vlm_node_1016
   habitat_conda_env: vln
   vlm_gpu_fraction: 0.7
@@ -23,7 +23,7 @@ resources:
   vlm_cpus: 4
   sim_cpus: 4
 rollout:
-  max_steps: 200
+  max_steps: 300
   temperature: 1.0
   action_space_str: '[stop, forward, left, right, up, down]'
   system_prompt: ${read_text:conf/prompts/vln_prompt.txt}
@@ -57,7 +57,7 @@ sim:
   auto_flush: false
   ep_seed: null #null because dataloader not working yet
 training:
-  checkpoint: null #Aasdfip/rpp_t_clipcov_llr_new-checkpoint_271
+  checkpoint: Aasdfip/rpp_t_clipcov_llr_new-checkpoint_271
   load_optim: false
   load_sched: false
   learning_rate: 1.0e-05
