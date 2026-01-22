@@ -80,7 +80,7 @@ def collect_rollouts(
     vlm_handles: list,
     shard_iterator: Iterator[list[str]],
     target_episodes: int = float('inf'),
-    postprocess_kwargs = {"return_inputs":True}
+    postprocess_kwargs = {"return_inputs":True, "return_logprobs":True}
 ) -> tuple[list,list,list]:
     """
     Orchestrates the RL collection pipeline.

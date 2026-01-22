@@ -299,6 +299,8 @@ class HabitatWorker:
         )
         import utils.measures
         from habitat import make_dataset
+        import ovon.dataset.ovon_dataset #register ovon dataset
+        import ovon.measurements.nav # register ovon measurements
         """
         assigned_episode_labels: List of strings ['scene_id_episode_id', ...] specific to this worker.
         enable_caching: If True, stores observations for video generation.
@@ -903,7 +905,8 @@ class LoggingHabitatWorker(HabitatWorker):
 
         # 6. Send to Global Logger
         if self.logger_actor:
-            self.logger_actor.log_row.remote(row=payload)
+            import ray
+            ray.get(self.logger_actor.log_row.remote(row=payload))
         return ep_path
 
     def reset(self, episode_id=None,output_schema=None,logging_schema=None):

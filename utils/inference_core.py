@@ -246,41 +246,44 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
             inputs = self._pack_inputs()
             self.rl_seq_inputs = inputs
         return habitat_handle,is_exhausted,state_dict,trajectory,inputs,embeds
-    
-    def postprocess_episode(self):
+
+    def postprocess_episode(self,eval=False):
         '''
         clears the internal state and returns the processed trajectory and model inputs.
         - trajectory includes: 
             - rollout logprobs (for rollout correction)
             - old logprobs (calculated from same weights as rollout model but with full forward pass instead of kv cache)
+        If eval is True, skips forward passes and just returns raw trajectory
         '''
         model_inputs = None
-        values = None
-        import torch
-        with torch.no_grad():
-            if self.rl_embeds_inputs is not None:
-                logits,values = self._forward_embeds(self.rl_embeds_inputs,None,self.rl_algo_config.use_value)
-                model_inputs = self.rl_embeds_inputs
-            elif self.rl_seq_inputs is not None:
-                logits,values = self._forward_seq(self.rl_seq_inputs,None,self.rl_algo_config.use_value)
-                model_inputs = self.rl_seq_inputs
-            else:
-                raise ValueError("No stored model inputs found for postprocessing.")
-            logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
-            self.rl_trajectory['old_logprobs'] = logprobs
-            if values is not None:
-                self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
 
-        if self.rl_algo_config.use_ref:
+        if not eval: # skip logprobs calculation during eval for speed.
+            values = None
+            import torch
             with torch.no_grad():
-                self.unmerge_adapter()
-                with self.model.disable_adapter():
-                    if self.rl_embeds_inputs is not None:
-                        logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
-                    elif self.rl_seq_inputs is not None:
-                        logits,values = self._forward_seq(self.rl_seq_inputs,None,False)
-                    ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
-                    self.rl_trajectory['ref_logprobs'] = ref_logprobs
+                if self.rl_embeds_inputs is not None:
+                    logits,values = self._forward_embeds(self.rl_embeds_inputs,None,self.rl_algo_config.use_value)
+                    model_inputs = self.rl_embeds_inputs
+                elif self.rl_seq_inputs is not None:
+                    logits,values = self._forward_seq(self.rl_seq_inputs,None,self.rl_algo_config.use_value)
+                    model_inputs = self.rl_seq_inputs
+                else:
+                    raise ValueError("No stored model inputs found for postprocessing.")
+                logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
+                self.rl_trajectory['old_logprobs'] = logprobs
+                if values is not None:
+                    self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
+
+            if self.rl_algo_config.use_ref:
+                with torch.no_grad():
+                    self.unmerge_adapter()
+                    with self.model.disable_adapter():
+                        if self.rl_embeds_inputs is not None:
+                            logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
+                        elif self.rl_seq_inputs is not None:
+                            logits,values = self._forward_seq(self.rl_seq_inputs,None,False)
+                        ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
+                        self.rl_trajectory['ref_logprobs'] = ref_logprobs
 
         return self.rl_trajectory,model_inputs    
     
@@ -289,8 +292,8 @@ class RLRayWorker(RLWorker):
         habitat_handle,is_exhausted,state_dict,_,_,_ = super().run_episode(habitat_handle, initial_state_ref)
         return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
     
-    def postprocess_episode(self,return_inputs = True):
-        trajectory,model_inputs = super().postprocess_episode()
+    def postprocess_episode(self,return_inputs = True,eval=False):
+        trajectory,model_inputs = super().postprocess_episode(eval=eval)
         if return_inputs:
             inputs_tensors,inputs_metadata = TensorPacker.pack(model_inputs)
             return trajectory,inputs_tensors,inputs_metadata

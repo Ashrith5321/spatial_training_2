@@ -175,7 +175,15 @@ class WandbLoggerActor:
             level=level
         )  
         
-
+    def flush(self):
+        """Forces a commit of the current table buffer to WandB."""
+        if self.rows_since_last_commit > 0 and self.table is not None:
+            # Create a payload with just the table
+            payload = {"episode_details": self.table}
+            self.run.log(payload)
+            
+            # Reset the counter
+            self.rows_since_last_commit = 0
     def close(self):
         # Flush the table one last time
         if self.table and self.rows_since_last_commit > 0:

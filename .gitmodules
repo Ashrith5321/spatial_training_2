@@ -1,3 +1,6 @@
 [submodule "verl"]
 	path = verl
 	url = git@github.com:volcengine/verl.git
+[submodule "ovon"]
+	path = ovon
+	url = git@github.com:naokiyokoyama/ovon.git

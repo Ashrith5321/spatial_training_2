@@ -67,8 +67,7 @@ def main(cfg: RLConfig):
     try:
         all_episodes = [s for shard in shard_iter_copy for s in shard]
     except:
-        all_episodes = [None]*1000 #fallback
-    trajectory_list = []
+        all_episodes = [None]*10000 #fallback
 
     def cleanup():
         for trainer in trainers:
@@ -76,6 +75,7 @@ def main(cfg: RLConfig):
         for sim in sims:
             ray.kill(sim)
         if wandb_actor is not None:
+            ray.get(wandb_actor.close.remote())
             ray.kill(wandb_actor)
         ray.shutdown()
 
@@ -92,17 +92,17 @@ def main(cfg: RLConfig):
             pickle.dump(obj,f)
     
     # ------------------------------------------- rollouts ------------------------------------------
-    for i in range(len(all_episodes)//bootstrapper.typed_cfg.training.rl_config.n_rollout):
+    for i in range(max(len(all_episodes)//bootstrapper.typed_cfg.training.rl_config.n_rollout,1)):
         logger.info("Starting rollout collection!")
         # bootstrapper.typed_cfg.training.rl_config.n_rollout
-        rollout_list,result_dict,log_dict = collect_rollouts(sims,trainers,shard_iter,bootstrapper.typed_cfg.training.rl_config.n_rollout,{"return_inputs":False}) #
+        rollout_list,result_list,log_list = collect_rollouts(sims,trainers,shard_iter,bootstrapper.typed_cfg.training.rl_config.n_rollout,{"return_inputs":False,"eval":True}) #
         if len(rollout_list) == 0:
             break
         # save for analysis
         pickle_obj(rollout_list, f"rollout_{i}")
-        pickle_obj(result_dict, f"result_{i}")
-        pickle_obj(log_dict,f"logpaths_{i}")
-
+        pickle_obj(result_list, f"result_{i}")
+        pickle_obj(log_list,f"logpaths_{i}")
+    ray.get(log_list)
     cleanup()
 
 if __name__ == "__main__":
