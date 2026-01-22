@@ -65,7 +65,7 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
             padded = padded.squeeze(-1)
             
         batch[key] = padded
-
+    
     batch['old_log_prob'] = batch['old_logprobs'].gather(2, batch['actions'].unsqueeze(-1)).squeeze(-1)
     # 3. Create Response Mask
     # 1 for valid tokens, 0 for padding
@@ -80,7 +80,7 @@ def collect_rollouts(
     vlm_handles: list,
     shard_iterator: Iterator[list[str]],
     target_episodes: int = float('inf'),
-    postprocess_kwargs = {"return_inputs":True, "return_logprobs":True}
+    postprocess_kwargs = {"return_inputs":True, "eval":False}
 ) -> tuple[list,list,list]:
     """
     Orchestrates the RL collection pipeline.
@@ -209,6 +209,113 @@ def collect_rollouts(
     result_list = [result_dict[i] for i in range(num_rollouts)]
     log_list = [log_dict[i] for i in range(num_rollouts)]
     return ray.get(rollouts), result_list, log_list
+
+
+def apply_hybrid_splitting(batch, dagger_percentile=0.6, only_failures=True, stop_action_id=0,max_dagger_steps=100):
+    """
+    Mutates batch in-place to separate PPO and DAgger samples.
+    
+    Selection Logic:
+    1. Rescue: Selects worst trajectories based on min(returns).
+       - If only_failures=True, checks terminal reward.
+       - Phases out DAgger automatically if failure count drops to 0.
+    2. Surgical: Always catches False Positive/Negative stops everywhere.
+    
+    Args:
+        batch (TensorDict): Mutated in-place. 'response_mask' (int/long) is updated. 'dagger_mask' (int/long) is added.
+    """
+    device = batch['actions'].device
+    batch_size, seq_len = batch['actions'].shape
+    
+    # Use boolean view for logic, but keep original dtype for storage
+    # response_mask is (B, T), 1=valid, 0=pad
+    valid_mask_bool = batch['response_mask'].bool()
+    
+    # --- 1. Identify Failures (Terminal Reward Check) ---
+    lengths = valid_mask_bool.sum(dim=1).long()
+    last_indices = (lengths - 1).clamp(min=0)
+    
+    # Check reward at the final step
+    # Assumption: Success reward > 0.1 (accounting for float slack)
+    terminal_rewards = batch['rewards'][torch.arange(batch_size, device=device), last_indices]
+    is_failure = terminal_rewards <= 0.1 
+    
+    # --- 2. Score Trajectories (Min Step-Level Return) ---
+    masked_returns = batch['returns'].clone()
+    masked_returns[~valid_mask_bool] = float('inf')
+    
+    # (B,) Scores: Lower is worse
+    trajectory_scores = masked_returns.min(dim=1).values
+    
+    # --- 3. Trajectory Selection (The Rescue) ---
+    traj_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    
+    if only_failures:
+        # Filter: Only consider failed indices
+        failed_indices = torch.nonzero(is_failure).squeeze(-1)
+        n_failures = len(failed_indices)
+        
+        if n_failures > 0:
+            # Calculate k based on the FAILURE count
+            k = int(n_failures * dagger_percentile)
+            
+            if k > 0:
+                # Get scores for failed episodes only
+                failed_scores = trajectory_scores[failed_indices]
+                # Find worst k among failures
+                _, top_k_sub_indices = torch.topk(failed_scores, k, largest=False)
+                # Map back to global batch indices
+                target_indices = failed_indices[top_k_sub_indices]
+                traj_mask[target_indices] = True
+    else:
+        # Standard: Bottom N% of ALL episodes
+        k = int(batch_size * dagger_percentile)
+        if k > 0:
+            _, target_indices = torch.topk(trajectory_scores, k, largest=False)
+            traj_mask[target_indices] = True
+    # --- 4. Mask Generation (Integrated Clipping) ---
+    # Create a time index tensor (1, T) to compare against max_dagger_steps
+    time_indices = torch.arange(seq_len, device=device).unsqueeze(0)
+    
+    # Generate the base DAgger mask:
+    # 1. Episode was selected (traj_mask)
+    # 2. Step is real data (valid_mask_bool)
+    # 3. Step is within the "useful" supervision window (time_indices < max_dagger_steps)
+    dagger_mask_bool = (
+        traj_mask.unsqueeze(1) & 
+        valid_mask_bool & 
+        (time_indices < max_dagger_steps)
+    )
+
+
+    # --- 4. Surgical Selection (FP/FN Stops) ---
+    actions = batch['actions']
+    oracle_actions = batch['oracle_actions']
+    
+    if oracle_actions.is_floating_point():
+        oracle_indices = oracle_actions.argmax(dim=-1)
+    else:
+        oracle_indices = oracle_actions
+
+    # FP: Agent=STOP (0), Oracle!=STOP
+    fp_mask = (actions == stop_action_id) & (oracle_indices != stop_action_id)
+    # FN: Agent!=STOP, Oracle=STOP (0)
+    fn_mask = (actions != stop_action_id) & (oracle_indices == stop_action_id)
+    
+    surgical_mask = (fp_mask | fn_mask) & valid_mask_bool
+    
+    # --- 5. Final Mutating Merge ---
+    # Merge masks
+    dagger_mask_bool = dagger_mask_bool | surgical_mask
+    
+    # Update PPO Mask (Remove DAgger steps from PPO)
+    # Ensure we maintain the original INT dtype
+    ppo_mask_bool = valid_mask_bool & (~dagger_mask_bool)
+    
+    batch['response_mask'] = ppo_mask_bool.to(batch['response_mask'].dtype)
+    batch['dagger_mask'] = dagger_mask_bool.to(batch['response_mask'].dtype)
+    
+    return batch
 
 @register_adv_est("reinforce_plus_plus_linear_time_aware")
 def compute_reinforce_plus_plus_linear_time_aware_advantage(

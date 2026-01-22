@@ -164,7 +164,8 @@ class EpisodeRolloutMixin:
                         "dones": state_dict['done'],
                         "spl": state_dict['info']['spl'],
                         "success": state_dict['info']['success'],
-                        "distance_to_goal": state_dict['info']['distance_to_goal']
+                        "distance_to_goal": state_dict['info']['distance_to_goal'],
+                        "oracle_actions": state_dict['info'].get('oracle_action',-1)
                     }
                     if compute_value:
                         import torch
@@ -311,6 +312,96 @@ class RLRayWorker(RLWorker):
     
         return super().train_rl_step(embeds_inputs, actions, old_log_prob, advantages, returns, old_values, rollout_log_probs,ref_logprobs)
     
+    def train_dagger_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch):
+        """
+        Pure DAgger (Behavior Cloning) Step.
+        """
+        embeds_inputs = TensorPacker.unpack(embeds_inputs_np, embeds_inputs_meta, device=self.accelerator.device)
+        
+        # 1. Prepare Data
+        # Ensure we have the mask (default to all valid tokens if not provided)
+        dagger_mask = traj_batch.get('dagger_mask', traj_batch.get('response_mask', None))
+        if dagger_mask is None:
+            import torch
+             # Fallback: Create a ones mask matching action shape
+            dagger_mask = torch.ones_like(traj_batch['actions'], dtype=torch.bool)
+
+        expert_actions = traj_batch['oracle_actions']
+        # Robustness: Handle One-Hot vs Indices
+        # If input is (B, S, A) probabilities, convert to (B, S) indices
+        if expert_actions.dim() > 2:
+            expert_actions = expert_actions.argmax(dim=-1)
+
+        # 2. Dispatch
+        return super().generic_train_step(
+            embeds_inputs=embeds_inputs,
+            loss_fn_names=['bc'],
+            loss_kwargs_list={
+                'bc': {
+                    'expert_actions': expert_actions,
+                    'dagger_mask': dagger_mask
+                }
+            }
+        )
+
+    def train_dagrl_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch,rl_weight=1.0,bc_weight=0.05):
+        """
+        Hybrid Step: PPO + DAgger.
+        Assumes the driver has populated 'response_mask' (for PPO) and 
+        'dagger_mask' (for BC) to separate the data.
+        """
+        embeds_inputs = TensorPacker.unpack(embeds_inputs_np, embeds_inputs_meta, device=self.accelerator.device)
+        
+        # 1. Unpack RL Args
+        actions = traj_batch['actions']
+        old_log_prob = traj_batch['old_log_prob']
+        advantages = traj_batch['advantages']
+        returns = traj_batch['returns']
+        old_values = traj_batch.get('values', None)
+        rollout_log_probs = traj_batch.get('rollout_logprobs', None)
+        ref_logprobs = traj_batch.get('ref_logprobs', None)
+        
+        # The driver MUST provide this to avoid double-counting gradients
+        # (e.g. response_mask should be FALSE for DAgger samples)
+        rl_mask = traj_batch.get('response_mask') 
+        if rl_mask is None:
+            import torch
+             # Fallback (dangerous for hybrid): Assume all valid tokens are RL
+            rl_mask = torch.ones_like(actions, dtype=torch.bool)
+
+        # 2. Unpack DAgger Args
+        expert_actions = traj_batch['oracle_actions']
+        if expert_actions.dim() > 2:
+            expert_actions = expert_actions.argmax(dim=-1)
+            
+        dagger_mask = traj_batch.get('dagger_mask')
+        if dagger_mask is None:
+            import torch
+            # If missing in hybrid, assume NO DAgger (safety default)
+            dagger_mask = torch.zeros_like(actions, dtype=torch.bool)
+
+        # 3. Dispatch
+        return super().generic_train_step(
+            embeds_inputs=embeds_inputs,
+            loss_fn_names=['rl', 'bc'],
+            loss_kwargs_list={
+                'rl': {
+                    'actions': actions,
+                    'old_log_prob': old_log_prob,
+                    'advantages': advantages,
+                    'returns': returns,
+                    'old_values': old_values,
+                    'rollout_log_probs': rollout_log_probs,
+                    'ref_log_probs': ref_logprobs,
+                    'response_mask': rl_mask
+                },
+                'bc': {
+                    'expert_actions': expert_actions,
+                    'dagger_mask': dagger_mask
+                }
+            },
+            loss_weights=[rl_weight, bc_weight]
+        )
 class HabitatRayWorker(LoggingHabitatWorker):
     """
     Ray Actor wrapper for the LoggingHabitatWorker.

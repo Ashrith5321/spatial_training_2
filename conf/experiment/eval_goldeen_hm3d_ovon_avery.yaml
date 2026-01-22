@@ -48,8 +48,8 @@ sim:
   config_path: /Projects/spatial_training/conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
   workspace: /Projects/spatial_training
   scenes_dir: null
-  split: val_seen
-  fp_guard: false
+  split: val_unseen
+  fp_guard: true
   fn_guard: false
   voxel_kwargs: null
   output_schema:

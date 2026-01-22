@@ -43,6 +43,9 @@ habitat:
   task: # zero out noise
     base_noise: 0.0
     base_angle_noise: 0.0
+    measurements:
+      success:
+        success_distance: 1.0
   dataset:
     split: train
     type: "ObjectNav-v1"
