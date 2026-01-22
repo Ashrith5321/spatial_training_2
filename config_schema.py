@@ -151,6 +151,7 @@ class VLMTrainingConfig:
 @dataclass
 class HabitatConfig:
     config_path: str = "configs/objectnav_hm3d_rgbd_semantic.yaml"
+    dataset_path: Optional[str] = None
     workspace: Optional[str] = "/Projects/SG_VLN_HumanData/SG-VLN"
     scenes_dir: Optional[str] = None
     split: str = "val"

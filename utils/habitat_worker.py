@@ -516,19 +516,21 @@ class HabitatWorker:
                 - WARNING: if you provide this, you MUST provide it every step, with the same keys. otherwise your data won't align properly!
         """
 
-        extras = {'+fp_stop':-1*int(not self.fp_guard),'+fn_stop':-1*int(not self.fn_guard)} # -1 for not enabled, 0 for enabled but not triggerd.
+        extras = {'+fp_stop':-99999*int(not self.fp_guard),'+fn_stop':-99999*int(not self.fn_guard)} # massive neg for not enabled, 0 for enabled but not triggerd.
         # oracle stop guards useful for reducin eval noise. #TODO: use habitat config instead of magic number
         try:
             last_distance = self.last_step['info']['distance_to_goal']
-            if self.fp_guard and action==0 and last_distance > 0.1:
-                action = np.random.choice([1,2,3]) #chose random non stop action
+            success_distance = self.config_env.habitat.task.measurements.success.success_distance
+            if action==0 and last_distance > success_distance:
+                if self.fp_guard:
+                    action = np.random.choice([1,2,3]) #chose random non stop action
                 extras['+fp_stop'] = 1 #record the false positive incident
-            if last_distance<0.1 and action!=0:
+            if last_distance<success_distance and action!=0:
                 if self.fn_guard: 
                     action = 0
                 extras['+fn_stop'] = 1
         except:
-            print("warning! cannot calculate collisions!")
+            print("warning! cannot calculate oracle guard!")
         import time
         # t0 = time.time()
         obs, reward, done, info = self.env.step(action)      

@@ -92,10 +92,11 @@ def main(cfg: RLConfig):
             pickle.dump(obj,f)
     
     # ------------------------------------------- rollouts ------------------------------------------
-    for i in range(max(len(all_episodes)//bootstrapper.typed_cfg.training.rl_config.n_rollout,1)):
+    batch_size = 16 # fixed batch size decoupled from RL logic for eval
+    for i in range(max(len(all_episodes)//batch_size,1)):
         logger.info("Starting rollout collection!")
         # bootstrapper.typed_cfg.training.rl_config.n_rollout
-        rollout_list,result_list,log_list = collect_rollouts(sims,trainers,shard_iter,bootstrapper.typed_cfg.training.rl_config.n_rollout,{"return_inputs":False,"eval":True}) #
+        rollout_list,result_list,log_list = collect_rollouts(sims,trainers,shard_iter,batch_size,{"return_inputs":False,"eval":True}) #
         if len(rollout_list) == 0:
             break
         # save for analysis
