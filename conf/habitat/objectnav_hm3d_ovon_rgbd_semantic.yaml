@@ -54,5 +54,5 @@ habitat:
   dataset:
     type: "OVON-v1"
     split: train
-    data_path: /Projects/SG_VLN_HumanData/SG-VLN/data/datasets/objectnav/hm3d_ovon/hm3d/{split}/{split}.json.gz #data/datasets/ovon/hm3d/v1/{split}/{split}.json.gz
+    data_path: data/datasets/objectnav/hm3d_ovon/hm3d/{split}/{split}.json.gz #data/datasets/ovon/hm3d/v1/{split}/{split}.json.gz
 

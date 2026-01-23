@@ -393,12 +393,15 @@ class HabitatWorker:
         )
         import utils.measures #register custom measures
         from habitat import make_dataset
-        try:
-            import ovon.dataset.ovon_dataset #register ovon dataset
-            import ovon.measurements.nav # register ovon measurements
-        except ImportError:
-            print("OVON not installed, skipping OVON dataset/measurements registration")
-            pass
+        import utils.ovon.ovon_dataset
+        import utils.ovon.ovon_nav
+        # try:
+        #     import ovon.dataset.ovon_dataset #register ovon dataset
+        #     import ovon.measurements.nav # register ovon measurements
+        # except ImportError:
+
+        #     print("OVON not installed, skipping OVON dataset/measurements registration")
+        #     pass
         """
         assigned_episode_labels: List of strings ['scene_id_episode_id', ...] specific to this worker.
         enable_caching: If True, stores observations for video generation.
