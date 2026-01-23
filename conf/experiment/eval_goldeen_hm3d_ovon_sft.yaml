@@ -3,7 +3,7 @@ task:
   run_name: override_me
   wandb_project: "rl_eval"
   shard_size: 0
-  subset_label: "sample400_a"
+  subset_label: ""
   episode_json: ''
   output_dir: ./dump/rl_eval
   jobtype: eval
@@ -49,7 +49,7 @@ sim:
   workspace: /Projects/spatial_training
   scenes_dir: null
   split: val_seen
-  fp_guard: false
+  fp_guard: true
   fn_guard: false
   voxel_kwargs: null
   output_schema:
