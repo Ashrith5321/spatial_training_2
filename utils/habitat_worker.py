@@ -769,9 +769,16 @@ class HabitatWorker:
         info['+step_in_epoch']=curr_idx % self.shard_length
         
         try:
-            info['+oracle_action'] = self.nav_oracle.get_best_action()
+            oracle_action = self.nav_oracle.get_best_action()
         except:
-            info['+oracle_action'] = -1 # failed to get oracle action
+            oracle_action = -1 # failed to get oracle action
+        distance = step_dict['info']['distance_to_goal']
+        success_distance = self.config_env.habitat.task.measurements.success.success_distance
+        if oracle_action == 0:
+            if distance is None or distance > success_distance:
+                oracle_action = -1 # navmesh failure cause oracle false stop
+        info['+oracle_action'] = oracle_action
+
         # 2. Provide Semantic Mapping (ID -> Label), too expensive, should just request once instead of always send.
         # The driver can now map any pixel in obs['semantic'] to a string.
         # if 'semantic' in obs:

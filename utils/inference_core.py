@@ -138,6 +138,8 @@ class EpisodeRolloutMixin:
                 # print("done")
                 #except for the first turn, all messages follow the exact same template.
                 action_id = np.random.choice(len(action_probs),p=action_probs) # sampling
+                oracle_action_id = state_dict['info'].get('oracle_action',-1) # only update temporally afterwards
+
                 entropy = -np.sum(action_probs * np.log(action_probs + 1e-9))
                 vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':action_probs[action_id],"action_probs":action_probs} 
                 # D. Store Transition
@@ -165,7 +167,7 @@ class EpisodeRolloutMixin:
                         "spl": state_dict['info']['spl'],
                         "success": state_dict['info']['success'],
                         "distance_to_goal": state_dict['info']['distance_to_goal'],
-                        "oracle_actions": state_dict['info'].get('oracle_action',-1)
+                        "oracle_actions": oracle_action_id
                     }
                     if compute_value:
                         import torch
@@ -173,7 +175,6 @@ class EpisodeRolloutMixin:
                         with torch.no_grad():
                             trajectory_dict["values"] = self._compute_value(outputs).cpu().numpy()
                     trajectory_buffer.append(trajectory_dict)
-
                 messages = substitute_convo_template(self.rollout_config['convo_turn_template'],{"action":self.rollout_config['action_space'][action_id]})
                 # print(f"sim step{step_count}")
                 done = state_dict['done']
