@@ -141,7 +141,7 @@ class EpisodeRolloutMixin:
                 oracle_action_id = state_dict['info'].get('oracle_action',-1) # only update temporally afterwards
 
                 entropy = -np.sum(action_probs * np.log(action_probs + 1e-9))
-                vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':action_probs[action_id],"action_probs":action_probs} 
+                vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':float(action_probs[action_id]),"action_probs":action_probs.tolist()} 
                 # D. Store Transition
                
 
