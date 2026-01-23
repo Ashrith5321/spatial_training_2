@@ -787,7 +787,14 @@ class VLMTrainingMixin:
         from verl.trainer.ppo.core_algos import compute_value_loss,compute_entropy_loss
         #TODO: rollout correction, rejection sampling to exclude bad tokens
         log_prob = torch.gather(log_probs, -1, actions.unsqueeze(-1).to(log_probs.device)).squeeze(-1)
-        response_mask = response_mask.to(log_prob.device)
+        response_mask = response_mask.to(log_prob.device).bool()
+        # --- CRITICAL FIX: Handle Pure DAgger Episodes ---
+        if response_mask.sum() == 0:
+            print("warning: empty RL mask, skipping RL loss.")
+            # If PPO has no data (all tokens went to DAgger), return 0 loss safely.
+            # We strictly require grad=True for DDP compatibility.
+            zero_loss = torch.tensor(0.0, device=log_probs.device, requires_grad=True)
+            return zero_loss, {'loss/pg_loss': 0.0, 'return': 0.0, 'train/vf_loss': 0.0}
         pg_loss,metrics = self.policy_loss_fn(old_log_prob=old_log_prob.to(log_prob.device),log_prob=log_prob,advantages=advantages.to(log_prob.device),response_mask=response_mask,config = self.rl_algo_config)
         metrics['loss/pg_loss'] = pg_loss.detach().item()
         metrics['return'] = torch.amax(returns).detach().item()
@@ -832,28 +839,40 @@ class VLMTrainingMixin:
         
         # We only want to train on the specific tokens masked for DAgger
         # (e.g. the 5% worst episodes)
-        active_indices = dagger_mask.view(-1).to(log_probs.device)
+        # --- ROBUSTNESS FIX: Sanitize Targets ---
+        # Ensure we don't train on -1 or indices >= vocab size
+        vocab_size = log_probs.size(-1)
+        dagger_mask = dagger_mask.bool()
+        # Create a mask of valid targets
+        # This filters out -1s (Oracle failures) or garbage indices
         
-        if not active_indices.any():
-            return torch.tensor(0.0, device=log_probs.device), {}
+        # Combine with the requested DAgger mask
+        # We only train if: 1. It's selected for DAgger AND 2. The label is valid
+        active_indices = dagger_mask.view(-1).to(log_probs.device)
 
         flat_log_probs = log_probs.view(-1, log_probs.size(-1))
         flat_targets = expert_actions.view(-1).to(log_probs.device)
-        
+        valid_target_mask = (flat_targets >= 0) & (flat_targets < vocab_size)
+        active_indices = active_indices & valid_target_mask.to(active_indices.device)
+        if not active_indices.any():
+            zero_loss = torch.tensor(0.0, device=log_probs.device, requires_grad=True)
+            return zero_loss, {}
+
         logits = kwargs.get('logits')
         if logits is not None:
-             flat_logits = logits.view(-1, logits.size(-1))
-             loss = F.cross_entropy(
-                flat_logits[active_indices], 
-                flat_targets[active_indices],
-                label_smoothing=label_smoothing
-             )
+            action_logits = logits[..., self.vocab_ids]
+            flat_logits = action_logits.view(-1, action_logits.size(-1))
+            loss = F.cross_entropy(
+            flat_logits[active_indices], 
+            flat_targets[active_indices],
+            label_smoothing=label_smoothing
+            )
         else:
-             # Fallback if only log_probs available (no smoothing easily available)
-             loss = F.nll_loss(
-                flat_log_probs[active_indices], 
-                flat_targets[active_indices]
-             )
+            # Fallback if only log_probs available (no smoothing easily available)
+            loss = F.nll_loss(
+            flat_log_probs[active_indices], 
+            flat_targets[active_indices]
+            )
         
         metrics = {'loss/dagger_loss': loss.detach().item()}
         

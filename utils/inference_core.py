@@ -139,7 +139,7 @@ class EpisodeRolloutMixin:
                 #except for the first turn, all messages follow the exact same template.
                 action_id = np.random.choice(len(action_probs),p=action_probs) # sampling
                 entropy = -np.sum(action_probs * np.log(action_probs + 1e-9))
-                vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':action_probs[action_id]} 
+                vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':action_probs[action_id],"action_probs":action_probs} 
                 # D. Store Transition
                
 

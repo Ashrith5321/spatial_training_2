@@ -211,7 +211,7 @@ def collect_rollouts(
     return ray.get(rollouts), result_list, log_list
 
 
-def apply_hybrid_splitting(batch, dagger_percentile=0.6, only_failures=True, stop_action_id=0,max_dagger_steps=100):
+def apply_hybrid_splitting(batch, dagger_percentile=0.3, only_failures=True, stop_action_id=0,max_dagger_steps=500):
     """
     Mutates batch in-place to separate PPO and DAgger samples.
     
@@ -238,7 +238,8 @@ def apply_hybrid_splitting(batch, dagger_percentile=0.6, only_failures=True, sto
     # Check reward at the final step
     # Assumption: Success reward > 0.1 (accounting for float slack)
     terminal_rewards = batch['rewards'][torch.arange(batch_size, device=device), last_indices]
-    is_failure = terminal_rewards <= 0.1 
+    initial_oracle = batch['oracle_actions'][:,0]
+    can_use_oracle = (terminal_rewards <= 0.1) & (initial_oracle!=0) #failure cases where oracle manages to find a path.
     
     # --- 2. Score Trajectories (Min Step-Level Return) ---
     masked_returns = batch['returns'].clone()
@@ -252,7 +253,7 @@ def apply_hybrid_splitting(batch, dagger_percentile=0.6, only_failures=True, sto
     
     if only_failures:
         # Filter: Only consider failed indices
-        failed_indices = torch.nonzero(is_failure).squeeze(-1)
+        failed_indices = torch.nonzero(can_use_oracle).squeeze(-1)
         n_failures = len(failed_indices)
         
         if n_failures > 0:
