@@ -112,17 +112,23 @@ def save_run_video(steps_data, filename, output_dir, fps=4, quality=6,return_thu
     # Handle the appended action 0 logic from your original code
     # (Ensure we don't mutate the passed read-only object in a way that breaks things)
     actions = steps_data['action'] + [0]
-    
+    try:
+        action_probs = steps_data["sup/action_probs"] + [[0,0,0,0]]
+    except:
+        action_probs = [[0,0,0,0]]*len(actions)
+
     texts = [
         [
             f"episode: {steps_data['info'][0]['episode_label']} step: {idx}",
-            action_list[int(action)],
+            f"action: {action_list[int(action)]} @ P={probs[int(action)]:.3f}",
+            f"probs: {[f'{prob:.3f}' for prob in probs]}",
+            f"oracle: {action_list[int(info.get('oracle_action',0))]}",
             f"distance_to_goal: {info.get('distance_to_goal',None)}",
             f"distance_reward: {info.get('distance_to_goal_reward',None)}",
             f"goal: {obs['instr_or_goal']}",
             f"spl: {steps_data['info'][-1].get('spl',None)}",
         ]
-        for idx, (action, obs, info) in enumerate(zip(actions, steps_data['obs'], steps_data['info']))
+        for idx, (action,probs,obs, info) in enumerate(zip(actions, action_probs, steps_data['obs'], steps_data['info']))
     ]
     
     images = [vut.overlay_text_to_image(image, text) for image, text in zip(images, texts)]
@@ -325,7 +331,7 @@ class ObjectNavOracle:
         for goal in episode.goals:
             # 1. Prefer explicit ViewPoints (guaranteed navigable locations)
             if hasattr(goal, 'view_points') and goal.view_points:
-                candidates.extend([vp.agent_state.position for vp in goal.view_points])
+                candidates.extend([self.sim.pathfinder.snap_point(vp.agent_state.position) for vp in goal.view_points])
             else:
                 # 2. Fallback: Snap object position to NavMesh
                 snapped_pos = self.sim.pathfinder.snap_point(goal.position)
@@ -373,11 +379,10 @@ class ObjectNavOracle:
         distance_to_goal = self.env.task.measurements.measures[self.goal_measure].get_metric()
         if distance_to_goal is not None and distance_to_goal < self.success_distance:
             return 0  # STOP
-
-        # path.points[-1] is the target destination (closest candidate)
         best_target = path.points[-1]
         
         return self.follower.get_next_action(best_target)
+    
 class HabitatWorker:
     def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None,ep_seed=None):
         from habitat.config.default import get_config
@@ -460,6 +465,7 @@ class HabitatWorker:
             print("skipping sim initialization since no shards provided, please call assign_shard")
             self.episode_counter = 0
             self.shard_length = 0
+
     def _resolve_task_specific_logic(self):
         """
         rigorously detects the TaskType by inspecting the observation space 
@@ -763,9 +769,16 @@ class HabitatWorker:
         info['+step_in_epoch']=curr_idx % self.shard_length
         
         try:
-            info['+oracle_action'] = self.nav_oracle.get_best_action()
+            oracle_action = self.nav_oracle.get_best_action()
         except:
-            info['+oracle_action'] = -1 # failed to get oracle action
+            oracle_action = -1 # failed to get oracle action
+        distance = step_dict['info']['distance_to_goal']
+        success_distance = self.config_env.habitat.task.measurements.success.success_distance
+        if oracle_action == 0:
+            if distance is None or distance > success_distance:
+                oracle_action = -1 # navmesh failure cause oracle false stop
+        info['+oracle_action'] = oracle_action
+
         # 2. Provide Semantic Mapping (ID -> Label), too expensive, should just request once instead of always send.
         # The driver can now map any pixel in obs['semantic'] to a string.
         # if 'semantic' in obs:
