@@ -75,6 +75,72 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
     batch['response_mask'] = response_mask
     return TensorDict(batch,batch_size=batch['old_log_prob'].shape[:2])
 
+def collate_debug_trajectories(trajectory_list: list[dict], device='cpu'):
+    """
+    Collates a list of trajectory dictionaries (numpy arrays) into a batched Tensor dictionary.
+    Handles variable-length sequences via padding.
+
+    Args:
+        trajectory_list: List of dicts, where each dict has keys like 'actions', 'rewards', 'values'.
+                         Shapes are expected to be (Seq_Len, ...) without batch dim.
+        device: Target device for the tensors (default 'cpu', move to GPU before GAE).
+
+    Returns:
+        batch (dict): Dictionary of stacked, padded tensors (Batch, Max_Seq_Len, ...).
+        response_mask (torch.Tensor): Boolean/Float mask (Batch, Max_Seq_Len), 1.0 for valid, 0.0 for pad.
+    """
+    if not trajectory_list:
+        return {}, None
+
+    # 1. Identify Keys and Dtypes
+    # We infer expected types based on common RL keys to ensure PyTorch compatibility
+    keys = trajectory_list[0].keys()
+    batch = {}
+    
+    # Pre-calculate lengths for mask creation
+    # Assumes 'actions' is always present and represents the timeline length
+    lengths = [len(t['actions']) for t in trajectory_list]
+    max_len = max(lengths)
+    batch_size = len(trajectory_list)
+
+    # 2. Iterate keys and Pad
+    for key in keys:
+        # Extract list of numpy arrays for this key
+        arrays = [t[key] for t in trajectory_list]
+        
+        # Convert to Tensor (Automatically handles float/int inference)
+        # Note: We force float32 for typical float types to avoid double precision overhead
+        tensors = []
+        for arr in arrays:
+            t = torch.tensor(arr, device=device)
+            if key in ['rewards', 'values', 'old_logprobs', 'logprobs', 'ref_logprobs']:
+                t = t.float() # Ensure float32
+            elif key in ['actions']:
+                t = t.long()  # Ensure int32 for pointer
+            tensors.append(t)
+            
+        # Pad Sequence
+        # batch_first=True -> (Batch, Seq, ...)
+        # padding_value=0 is standard (masked out anyway)
+        padded = pad_sequence(tensors, batch_first=True, padding_value=0)
+        
+        # Squeeze singleton dimensions if they exist (e.g. values being B,S,1)
+        if padded.dim() == 3 and padded.shape[-1] == 1:
+            padded = padded.squeeze(-1)
+            
+        batch[key] = padded
+    try:
+        batch['old_log_prob'] = batch['old_logprobs'].gather(2, batch['actions'].unsqueeze(-1)).squeeze(-1)
+    except:
+        print("cannot collate old log probs")
+    # 3. Create Response Mask
+    # 1 for valid tokens, 0 for padding
+    response_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+    for i, length in enumerate(lengths):
+        response_mask[i, :length] = 1
+    batch['response_mask'] = response_mask
+    return TensorDict(batch,batch_size=batch['rewards'].shape[:2])
+
 def collect_rollouts(
     sim_handles: list,
     vlm_handles: list,
@@ -317,6 +383,213 @@ def apply_hybrid_splitting(batch, dagger_percentile=0.3, only_failures=True, sto
     batch['dagger_mask'] = dagger_mask_bool.to(batch['response_mask'].dtype)
     
     return batch
+import torch
+import torch.nn.functional as F
+
+class BinnedKernelCritic:
+    def __init__(self, n_bins=1024, device="cuda" if torch.cuda.is_available() else "cpu"):
+        self.n_bins = n_bins
+        self.device = device
+        self.min_val = None
+        self.max_val = None
+        self.bin_width = None
+        
+        # The learned lookup table
+        self.smooth_val = None
+
+    def fit(self, flat_features, flat_returns, traj_ids=None, sigma=1.0, k_bandwidth=None):
+        """
+        Fits the critic and prepares Leave-One-Trajectory-Out (LOTO) lookup tables.
+        
+        Args:
+            traj_ids: Tensor of same length as flat_features/flat_returns indicating trajectory membership.
+                       If None, standard global fitting is done without LOTO.
+            sigma: Fixed bandwidth (used if k_bandwidth is None).
+            k_bandwidth: If set (int), enables ADAPTIVE bandwidth.
+                         The bandwidth at bin i will be the width required 
+                         to capture 'k_bandwidth' samples.
+        """
+        # 1. Prepare Data
+        f_flat = flat_features.float().detach()
+        r_flat = flat_returns.float().detach()
+        if traj_ids is None:
+            t_flat = torch.zeros_like(f_flat, dtype=torch.long)
+        else:
+            t_flat = traj_ids.long()
+      
+        
+        # Get number of trajectories from the max ID (assuming 0-indexed contiguous)
+        self.n_trajs = t_flat.max().item() + 1
+        
+        # 2. Discretize
+        self.min_val = f_flat.min()
+        self.max_val = f_flat.max() + 1e-5 
+        self.bin_width = (self.max_val - self.min_val) / self.n_bins
+        
+        bin_indices = ((f_flat - self.min_val) / self.bin_width).long()
+        bin_indices = torch.clamp(bin_indices, 0, self.n_bins - 1)
+        
+        # 3. Build "Global" Histograms (1D)
+        # We keep these for standard predictions on new data
+        global_rtn = torch.zeros(self.n_bins, device=self.device)
+        global_count = torch.zeros(self.n_bins, device=self.device)
+        global_rtn.index_add_(0, bin_indices, r_flat)
+        global_count.index_add_(0, bin_indices, torch.ones_like(r_flat))
+        
+        # 4. Build "Per-Trajectory" Histograms (2D: N_trajs x N_bins)
+        # Strategy: Flatten indices to 1D (traj_idx * n_bins + bin_idx) for efficient scatter
+        flat_grid_idx = t_flat * self.n_bins + bin_indices
+        
+        traj_rtn_flat = torch.zeros(self.n_trajs * self.n_bins, device=self.device)
+        traj_count_flat = torch.zeros(self.n_trajs * self.n_bins, device=self.device)
+        
+        traj_rtn_flat.index_add_(0, flat_grid_idx, r_flat)
+        traj_count_flat.index_add_(0, flat_grid_idx, torch.ones_like(r_flat))
+        
+        # Reshape to matrices
+        traj_rtn = traj_rtn_flat.view(self.n_trajs, self.n_bins)
+        traj_count = traj_count_flat.view(self.n_trajs, self.n_bins)
+
+        # 5. Compute Kernel Matrix (Same as before)
+        i_idx = torch.arange(self.n_bins, device=self.device).float()
+        dist_sq = (i_idx.view(-1, 1) - i_idx.view(1, -1)) ** 2
+
+        if k_bandwidth is not None:
+            # (Adaptive logic omitted for brevity, identical to previous snippet)
+            # Just ensure 'weights' is computed here
+            cdf = torch.cumsum(global_count, dim=0)
+            total_count = cdf[-1]
+            
+            # 2. For each bin, find the range [L, R] that contains k mass
+            # We use searchsorted on the CDF to do this vectorially
+            k_half = k_bandwidth / 2.0
+            
+            # Define target mass boundaries
+            target_l = (cdf - k_half).clamp(min=0)
+            target_r = (cdf + k_half).clamp(max=total_count)
+            
+            # Find bin indices corresponding to these masses
+            idx_l = torch.searchsorted(cdf, target_l)
+            idx_r = torch.searchsorted(cdf, target_r)
+            
+            # 3. Convert bin-distance to sigma
+            # Width is (right - left), sigma is roughly half width
+            sigma_vec = (idx_r - idx_l).float() * 0.5
+            
+            # Clamp sigma to avoid division by zero or degenerate peaks
+            sigma_vec = sigma_vec.clamp(min=1.0) # min 1 bin width
+            
+            # 4. Compute Adaptive Weights: sigma varies per ROW (i)
+            # shape (B, 1) broadcasted across columns
+            sigma_sq = sigma_vec.view(-1, 1) ** 2
+            weights = torch.exp(-dist_sq / (2 * sigma_sq)) 
+        else:
+            sigma_bins = sigma / self.bin_width
+            weights = torch.exp(-dist_sq / (2 * sigma_bins**2))
+
+        # 6. Smooth Global (1 x N_bins)
+        # smooth_num: (N_bins,)
+        global_smooth_num = weights @ global_rtn
+        global_smooth_den = weights @ global_count
+        
+        # 7. Smooth Trajectories (N_trajs x N_bins)
+        # We multiply the stack of histograms by the weight matrix
+        # (N_traj, N_bins) @ (N_bins, N_bins) -> (N_traj, N_bins)
+        # Note: weights is symmetric, so order doesn't matter for Gaussian
+        traj_smooth_num = traj_rtn @ weights.T
+        traj_smooth_den = traj_count @ weights.T
+        
+        # 8. Compute "Leave-One-Out" Tables via Subtraction
+        # Broadcasting: (1, N_bins) - (N_traj, N_bins)
+        loo_num = global_smooth_num.unsqueeze(0) - traj_smooth_num
+        loo_den = global_smooth_den.unsqueeze(0) - traj_smooth_den
+        
+        # Avoid division by zero and compute value
+        self.loo_vals = loo_num / (loo_den + 1e-6)
+        
+        # Also store global vals for standard inference
+        self.global_vals = global_smooth_num / (global_smooth_den + 1e-6)
+        x_axis = torch.linspace(self.min_val.item(), self.max_val.item(), self.n_bins, device='cpu')
+        return x_axis, self.global_vals
+    
+    def predict(self, features, query_traj_ids=None):
+        """
+        Args:
+            query_traj_ids: If provided, uses the LOTO table for that specific trajectory.
+                            If None, uses the global table (standard inference).
+        """
+        original_shape = features.shape
+        f_flat = features.view(-1)
+        
+        # 1. Coordinate Transforms
+        coords = (f_flat - self.min_val) / self.bin_width
+        coords = torch.clamp(coords, 0, self.n_bins - 1.001)
+        
+        x0 = coords.long()
+        x1 = x0 + 1
+        alpha = coords - x0.float()
+        x1 = torch.clamp(x1, 0, self.n_bins - 1)
+        
+        # 2. Select Lookup Table
+        if query_traj_ids is not None:
+            # CV Mode: Use LOTO table
+            t_flat = query_traj_ids.view(-1)
+            
+            # Advanced Indexing: [traj_idx, bin_idx]
+            y0 = self.loo_vals[t_flat, x0]
+            y1 = self.loo_vals[t_flat, x1]
+        else:
+            # Standard Mode: Use Global table
+            y0 = self.global_vals[x0]
+            y1 = self.global_vals[x1]
+        
+        # 3. Interpolate
+        preds = y0 + alpha * (y1 - y0)
+        return preds.view(original_shape)
+    
+@register_adv_est("reinforce_plus_plus_time_kernel")
+def compute_reinforce_plus_plus_linear_time_aware_advantage(
+    token_level_rewards: torch.Tensor, 
+    response_mask: torch.Tensor, 
+    config: Optional[AlgoConfig] = None, 
+    k_bandwidth: Optional[int] = 5000,
+    kernel_sigma: Optional[float] = 5.0,
+    alignment="start",
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute REINFORCE++ advantages using a Kernel Density Estimation Time Baseline.
+    """
+    assert config is not None
+    gamma = config.gamma
+    device = token_level_rewards.device
+    with torch.no_grad():
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+        traj_ids = torch.arange(token_level_rewards.shape[0], device=device).unsqueeze(1).expand(-1, token_level_rewards.shape[1])
+        traj_ids = traj_ids[response_mask.bool()] #flatten
+        
+        time = torch.arange(token_level_rewards.shape[1], device=device).unsqueeze(0).expand(token_level_rewards.shape[0], -1)
+        if alignment=="end":
+            seq_lengths = response_mask.sum(dim=-1)
+            time = time - seq_lengths.unsqueeze(1)
+        time = time[response_mask.bool()] #flatten
+        
+        for t in reversed(range(token_level_rewards.shape[1])):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            running_return = running_return * response_mask[:, t]
+
+        critic = BinnedKernelCritic(n_bins=1024, device=device)
+        critic.fit(time, returns[response_mask.bool()], traj_ids=traj_ids, sigma=kernel_sigma, k_bandwidth=k_bandwidth)
+        flat_baseline = critic.predict(time, query_traj_ids=traj_ids)
+        baseline = torch.zeros_like(returns)
+        baseline[response_mask.bool()] = flat_baseline
+        advantages = returns - baseline
+        advantages = verl_F.masked_whiten(advantages, response_mask)
+        advantages = advantages * response_mask
+
+    return advantages, returns
 
 @register_adv_est("reinforce_plus_plus_linear_time_aware")
 def compute_reinforce_plus_plus_linear_time_aware_advantage(
