@@ -10,6 +10,7 @@ import verl.utils.torch_functional as verl_F
 import torch.nn.functional as F
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo.core_algos import register_adv_est
+import time
 
 def collate_trajectories(trajectory_list: list[dict], device='cpu'):
     """
@@ -174,6 +175,7 @@ def collect_rollouts(
     log_dict = {}
     iterator_exhausted = False
 
+    last_dispatch_time = time.time()
     # --- 3. Bootstrap: Initial Sharding & Resets (IDENTICAL) ---
     for sim_handle in sim_handles:
         try:
@@ -223,8 +225,24 @@ def collect_rollouts(
         if not all_watch_refs:
             break
 
-        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1)
-        
+        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1,timeout=15.0)
+        if not ready_refs:
+            # If we get here, the orchestrator is "stuck" waiting.
+            # We can use this moment to diagnose.
+            
+            # Simple deadlock detector:
+            current_time = time.time()
+            if current_time - last_dispatch_time > 360: # 6 minutes
+                print(f"DEBUG: System frozen for >6m. Active: {len(active_episodes)}, PostProc: {len(pending_postproc)}")
+                
+                # Check 1: Are we waiting on a specific ref forever?
+                # Dump the first few active refs to inspect
+                import ipdb; ipdb.set_trace() 
+            
+            continue # Jump back to start of loop (and potentially dispatch more if resources freed up)
+
+        # CHANGE 3: Update timestamp when we actually get a result
+        last_dispatch_time = time.time()
         for ref in ready_refs:
             
             # --- CASE 1: Reset Finished ---
@@ -234,6 +252,7 @@ def collect_rollouts(
             
             # --- CASE 2: Episode Finished ---
             elif ref in active_episodes:
+                print("handling finished episode")
                 dispatch_id =  active_episodes.pop(ref)
                 # Unpack results
                 vlm, sim, is_exhausted, state = ray.get(ref)
@@ -261,8 +280,10 @@ def collect_rollouts(
                 # send the sim to reset/reshard so it can start working again asap
                 try:
                     if is_exhausted:
+                        print("assigning shard")
                         new_shard = next(shard_iterator)
                         sim.assign_shard.remote(new_shard)
+                    print("resetting sim")
                     new_reset_ref = sim.reset.remote()
                     pending_resets[new_reset_ref] = sim
                 except StopIteration:

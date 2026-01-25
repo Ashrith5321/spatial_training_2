@@ -384,7 +384,7 @@ class ObjectNavOracle:
         return self.follower.get_next_action(best_target)
     
 class HabitatWorker:
-    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None,ep_seed=None):
+    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None,ep_seed=None,log_oracle=False):
         from habitat.config.default import get_config
         from habitat.config import read_write
         from habitat.config.default_structured_configs import (
@@ -412,7 +412,7 @@ class HabitatWorker:
             os.chdir(workspace)
 
         self.postprocess = postprocess
-
+        self.log_oracle = log_oracle
         self.enable_caching = enable_caching
         if enable_caching:
             self.steps = defaultdict(list)
@@ -772,7 +772,10 @@ class HabitatWorker:
         info['+step_in_epoch']=curr_idx % self.shard_length
         
         try:
-            oracle_action = self.nav_oracle.get_best_action()
+            if self.log_oracle:
+                oracle_action = self.nav_oracle.get_best_action()
+            else:
+                oracle_action = 0
         except:
             oracle_action = -1 # failed to get oracle action
         distance = step_dict['info']['distance_to_goal']
