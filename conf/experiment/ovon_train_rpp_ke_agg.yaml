@@ -1,6 +1,6 @@
 # @package _global_
 task:
-  run_name: ovon_rpp
+  run_name: ovon_rpp_ke_g97
   wandb_project: rl_train
   shard_size: 0
   subset_label: ""
@@ -68,15 +68,15 @@ sim:
   auto_flush: false
   ep_seed: null
 training:
-  checkpoint: Aasdfip/rpp_t_clipcov_llr_new-checkpoint_247
+  checkpoint: Aasdfip/rpp_t_clipcov_llr_new-checkpoint_191
   load_optim: false
   load_sched: false
   learning_rate: 1.5e-06
-  grad_accum_steps: 2
+  grad_accum_steps: 4
   mixed_precision: 'no'
   gradient_checkpointing: true
   total_optimization_steps: 10000
-  warmup_steps: 128
+  warmup_steps: 256
   save_step: 8
   value_head_learning_rate: 0.0005
   value_head_dropout: 0.0
@@ -102,10 +102,10 @@ training:
   rl_config:
     use_value: false
     value_grad_scale: 0.1
-    advantage_estimator: reinforce_plus_plus
+    advantage_estimator: reinforce_plus_plus_time_kernel
     policy_loss_name: clip_cov
     n_rollout: 16
-    n_adv: 256
+    n_adv: 1024
     n_epoch: 2
     clip_ratio: 0.2
     clip_ratio_low: 0.28
@@ -120,7 +120,7 @@ training:
     cliprange_value: 0.2
     entropy_bonus: 0.0
     use_ref: true
-    kl_coeff: 0.001
+    kl_coeff: 0.000
     kl_target: 0.1
     global_batch_info: {}
   sft_config: null

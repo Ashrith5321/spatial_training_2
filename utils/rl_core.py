@@ -194,7 +194,7 @@ def collect_rollouts(
     # Helper to check if we should keep the loop alive
     def has_work():
         # 1. Are tasks currently running?
-        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0
+        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0 #or len(pending_logs) > 0
         # 2. Do we still want to launch new tasks (now or in the future)? (Resources available AND Target not met)
         potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
         want_launch = (potential < target_episodes) and (not iterator_exhausted) 
@@ -252,7 +252,7 @@ def collect_rollouts(
             
             # --- CASE 2: Episode Finished ---
             elif ref in active_episodes:
-                print("handling finished episode")
+                # print("handling finished episode")
                 dispatch_id =  active_episodes.pop(ref)
                 # Unpack results
                 vlm, sim, is_exhausted, state = ray.get(ref)
@@ -279,11 +279,12 @@ def collect_rollouts(
                 log_dict[dispatch_id] = ref # save the path to the log
                 # send the sim to reset/reshard so it can start working again asap
                 try:
+                    # print("logging done",end="")
                     if is_exhausted:
-                        print("assigning shard")
+                        # print("assigning shard")
                         new_shard = next(shard_iterator)
                         sim.assign_shard.remote(new_shard)
-                    print("resetting sim")
+                    # print("resetting sim")
                     new_reset_ref = sim.reset.remote()
                     pending_resets[new_reset_ref] = sim
                 except StopIteration:
@@ -569,12 +570,12 @@ class BinnedKernelCritic:
         return preds.view(original_shape)
     
 @register_adv_est("reinforce_plus_plus_time_kernel")
-def compute_reinforce_plus_plus_linear_time_aware_advantage(
+def compute_reinforce_plus_plus_time_kernel_advantage(
     token_level_rewards: torch.Tensor, 
     response_mask: torch.Tensor, 
     config: Optional[AlgoConfig] = None, 
-    k_bandwidth: Optional[int] = 5000,
-    kernel_sigma: Optional[float] = 5.0,
+    k_bandwidth: Optional[int] = None, #prev 5000, seem too small. 8000 should be good?
+    kernel_sigma: Optional[float] = 60.0,
     alignment="start",
     **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -609,8 +610,7 @@ def compute_reinforce_plus_plus_linear_time_aware_advantage(
         advantages = returns - baseline
         advantages = verl_F.masked_whiten(advantages, response_mask)
         advantages = advantages * response_mask
-
-    return advantages, returns
+    return advantages, returns, baseline
 
 @register_adv_est("reinforce_plus_plus_linear_time_aware")
 def compute_reinforce_plus_plus_linear_time_aware_advantage(

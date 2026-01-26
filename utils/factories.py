@@ -8,6 +8,20 @@ from config_schema import VLMConfig, RolloutConfig, ResourceConfig, HabitatConfi
 from typing import List, Dict, Any, Iterator, Optional,Union
 import logging
 import json
+thread_cap_env = {
+    "env_vars": {
+        "OMP_NUM_THREADS": "1", 
+        "MKL_NUM_THREADS": "1", 
+        "OPENBLAS_NUM_THREADS": "1", 
+        "VECLIB_MAXIMUM_THREADS": "1", 
+        "NUMEXPR_NUM_THREADS": "1",
+        # Optional: Reduce Habitat/Magnum logging spam while we're at it
+        "HABITAT_SIM_LOG": "quiet",
+        "MAGNUM_LOG": "quiet",
+        "TOKENIZERS_PARALLELISM": "false",
+        "HF_ENABLE_PARALLEL_LOADING": "false",
+    }
+}
 
 def save_hydra_config(config, save_dir: str, filename: str = "config.yaml"):
     """
@@ -93,7 +107,9 @@ class InferenceWorkerFactory:
             resources={res_cfg.vlm_resource_tag: 1},
             num_cpus=res_cfg.vlm_cpus,
             num_gpus=res_cfg.vlm_gpu_fraction,
-            runtime_env={"conda": res_cfg.vlm_conda_env}
+            runtime_env={"conda": res_cfg.vlm_conda_env} | thread_cap_env,
+            max_restarts=0,        # <--- CRITICAL: Do not restart on crash.
+            max_task_retries=-1,
         )
 
         return [
@@ -108,7 +124,7 @@ class RLWorkerFactory:
     def create(vlm_dict: dict, rollout_dict: dict, res_cfg: ResourceConfig):
         # res_cfg is fine to keep as object for resource logic
         from utils.inference_core import RLRayWorker
-        env_dict = None
+        env_dict = {}
         if res_cfg.vlm_conda_env is not None:
             env_dict = {"conda": res_cfg.vlm_conda_env}
         # We use the dicts directly to avoid pickling issues
@@ -116,7 +132,9 @@ class RLWorkerFactory:
             resources={res_cfg.vlm_resource_tag: 1},
             num_cpus=res_cfg.vlm_cpus,
             num_gpus=res_cfg.vlm_gpu_fraction,
-            runtime_env=env_dict
+            runtime_env=env_dict | thread_cap_env,
+            max_restarts=0,        # <--- CRITICAL: Do not restart on crash.
+            max_task_retries=-1,
         )
         workers =  [
             RemoteRLWorker.remote(
@@ -158,20 +176,25 @@ class RLWorkerFactory:
 
 class SimWorkerFactory:
     @staticmethod
-    def create(sim_dict: dict, res_cfg: ResourceConfig, task_cfg: RunConfig, logger_actor=None):
+    def create(sim_dict: dict, res_cfg: ResourceConfig, task_cfg: RunConfig, logger_actor=None,config_overrides=None):
         from utils.inference_core import HabitatRayWorker
-        env_dict = None
+        env_dict = {}
         if res_cfg.habitat_conda_env is not None:
             env_dict = {"conda": res_cfg.habitat_conda_env}
         RemoteSim = ray.remote(HabitatRayWorker).options(
             resources={res_cfg.sim_resource_tag: 1},
             num_cpus=res_cfg.sim_cpus,
             num_gpus=res_cfg.sim_gpu_fraction,
-            runtime_env=env_dict
+            runtime_env=env_dict |thread_cap_env,
+            max_restarts=0,        # <--- CRITICAL: Do not restart on crash.
+            max_task_retries=-1,
         )
 
         handles = []
         for i in range(res_cfg.num_sims):
+            if config_overrides is not None:
+                print(f"overriding sim {i} config with: {config_overrides[i]}")
+                sim_dict['config_path'] = config_overrides[i]
             # Calculate dynamic per-worker arguments
             log_dir = os.path.join(task_cfg.output_dir, task_cfg.run_name,"rollout")# f'worker_{i}')
             
@@ -216,6 +239,10 @@ class ExpBootstrapper:
 
     def setup_cluster(self):
         res = self.typed_cfg.resources
+        system_config = {
+            # "automatic_object_spilling_enabled": False,
+        }
+        osm = 500 * 1024 * 1024 * 1024
         if res.ray_address == "local":
             ray.init(
                 resources={
@@ -223,10 +250,11 @@ class ExpBootstrapper:
                     res.sim_resource_tag: res.num_sims,
                 },
                 ignore_reinit_error=True,
-                object_spilling_directory = res.object_spilling_directory
+                object_store_memory = osm,
+                object_spilling_directory = res.object_spilling_directory, _system_config=system_config,
             )
         else:
-            ray.init(address=res.ray_address, ignore_reinit_error=True)
+            ray.init(address=res.ray_address, ignore_reinit_error=True,_system_config=system_config,object_store_memory=osm)
     def bootstrap_logger(self):
         save_hydra_config(self.typed_cfg,os.path.join(self.typed_cfg.task.output_dir,self.typed_cfg.task.run_name))
         return WandbFactory.create(
@@ -267,7 +295,8 @@ class ExpBootstrapper:
             sim_dict=self.resolved_dict['sim'], 
             res_cfg=self.typed_cfg.resources, 
             task_cfg=self.typed_cfg.task, 
-            logger_actor=logger
+            logger_actor=logger,
+            config_overrides = self.typed_cfg.hab_config_list
         )
     
     def bootstrap_eval(self):

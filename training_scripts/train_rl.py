@@ -15,7 +15,15 @@ https://hydra.cc/docs/intro/
 eval "$(python training_scripts/train_rl.py -sc install=bash)"
 NOTE: tab completion only works if your command uses python not python3. somehow.
 '''
-
+import os
+# NUCLEAR THREAD CAP: Must be set before importing numpy/torch/ray
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_ENABLE_PARALLEL_LOADING"] = "false"
 from pathlib import Path
 import sys
 _ROOT = Path(__file__).resolve().parents[1]
@@ -102,7 +110,9 @@ def main(cfg: RLConfig):
 
     def pickle_obj(obj,filename):
         import pickle
-        filepath = os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"dbg",f"{filename}.pkl")
+        dirname = os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"dbg")
+        os.makedirs(dirname,exist_ok=True)
+        filepath = os.path.join(dirname,f"{filename}.pkl")
         with open(filepath,'wb') as f:
             pickle.dump(obj,f)
 
@@ -154,7 +164,8 @@ def main(cfg: RLConfig):
                 # lam=config.get('lam', 0.95)
             )
             advantages, returns = adv_tuple[0],adv_tuple[1]
-
+            if len(adv_tuple)>2:
+                traj_batch['baseline'] = adv_tuple[2]
             traj_batch['advantages'] = advantages
             traj_batch['returns'] = returns
             traj_batch = traj_batch[-bootstrapper.typed_cfg.training.rl_config.n_rollout:] # only train on most recent.
@@ -227,6 +238,8 @@ def main(cfg: RLConfig):
                         batch_row = traj_batch[rollout_idx] 
                         valid_mask = batch_row['response_mask'].bool()
                         traj_stats = batch_row[valid_mask] 
+
+
                         # 4. Log
                         rollout_stats = {
                             "rollout/ep_rew": traj_stats['rewards'].sum().item(),
@@ -234,13 +247,32 @@ def main(cfg: RLConfig):
                             "rollout/success": traj_stats['success'].max().item(), 
                             "rollout/spl": traj_stats['spl'].max().item(),
                             "rollout/ep_rtn": traj_stats['returns'].mean().item(),
+                            "rollout/rtn_var": traj_stats['returns'].var().item(),
                             "rollout/global_cycle": global_cycle
                         }
+                        try:
+                            mse = ((traj_stats['baseline']-traj_stats['returns'])**2).mean()
+                            rollout_stats |= {
+                                "rollout/baseline_mse":mse
+                            }
+                        except:
+                            print("cannot compute baseline metric")
                         result |= rollout_stats
-                        log_path = ray.get(log_list[rollout_idx])
-                        with open(log_path,'r') as f:
-                            vlm_log_dict = json.load(f)
-                        result |= vlm_log_dict
+                        log_ref = log_list[rollout_idx]
+                        try:
+                            # 1. Try to get the path with a short timeout (e.g., 0.1s)
+                            # If the Sim Worker is done, this is instant.
+                            log_path = ray.get(log_ref, timeout=30.0)
+                            
+                            with open(log_path, 'r') as f:
+                                vlm_log_dict = json.load(f)
+                            result |= vlm_log_dict
+                            
+                        except ray.exceptions.GetTimeoutError:
+                            # 2. If Sim Worker is stuck, log a warning but DO NOT FREEZE training
+                            logger.warning(f"Log file for rollout {rollout_idx} not ready (Sim Worker I/O Lag). Skipping detailed logs.")
+                        except Exception as e:
+                            logger.warning(f"Failed to read log file: {e}")
                         wandb_actor.log_row.remote(result)
                         completed_count += 1
                      
@@ -255,6 +287,11 @@ def main(cfg: RLConfig):
                 ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{global_cycle}")))
             else:
                 print(f"T-{steps_until_save} steps until checkpoint!")
+            print("saving debug...")
+            pickle_obj(traj_batch, f"tb_{global_cycle}")
+            pickle_obj(result_list, f"result_{global_cycle}")
+            pickle_obj(ray.get(log_list),f"logpaths_{global_cycle}")
+            del model_inputs
     finally:
 
         cleanup()

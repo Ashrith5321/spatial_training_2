@@ -1,6 +1,6 @@
 # @package _global_
 task:
-  run_name: ovon_rpp
+  run_name: hm3d_ovon_rpp_ke
   wandb_project: rl_train
   shard_size: 0
   subset_label: ""
@@ -22,6 +22,12 @@ resources:
   sim_gpu_fraction: 0.14
   vlm_cpus: 4
   sim_cpus: 4
+hab_config_list: #jank, 2:3 mixture of data
+  - conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
+  - conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
+  - conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
+  - conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
+  - conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
 rollout:
   max_steps: 350
   temperature: 1.0
@@ -68,14 +74,14 @@ sim:
   auto_flush: false
   ep_seed: null
 training:
-  checkpoint: Aasdfip/rpp_t_clipcov_llr_new-checkpoint_247
+  checkpoint: null
   load_optim: false
   load_sched: false
-  learning_rate: 1.5e-06
-  grad_accum_steps: 2
+  learning_rate: 2e-06
+  grad_accum_steps: 1
   mixed_precision: 'no'
   gradient_checkpointing: true
-  total_optimization_steps: 10000
+  total_optimization_steps: 20000
   warmup_steps: 128
   save_step: 8
   value_head_learning_rate: 0.0005
@@ -99,17 +105,18 @@ training:
     - up_proj
     - down_proj
     modules_to_save: null
+    use_rslora: true
   rl_config:
     use_value: false
     value_grad_scale: 0.1
-    advantage_estimator: reinforce_plus_plus
+    advantage_estimator: reinforce_plus_plus_time_kernel
     policy_loss_name: clip_cov
     n_rollout: 16
     n_adv: 256
     n_epoch: 2
     clip_ratio: 0.2
-    clip_ratio_low: 0.28
-    clip_ratio_high: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
     clip_ratio_c: 3.0
     policy_loss:
       clip_cov_ratio: 0.0002

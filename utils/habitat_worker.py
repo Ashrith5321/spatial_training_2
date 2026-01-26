@@ -270,6 +270,7 @@ def habitat_logging_helper(episode_data,summary_schema):
     sequence_logs['positions'] = [info['pos_rots'][:3] for info in episode_data['info'][:-1]] #final position is redundant due to stop action
     sequence_logs['quaterions'] = [info['pos_rots'][3:] for info in episode_data['info'][:-1]] #doubt this is meaningful in wandb but it can't cost that much storage right?
     sequence_logs['collision_events'] = raw_collisions
+    sequence_logs['distance_to_goal'] = [info['distance_to_goal'] for info in episode_data['info']]
     copy_keys = ['reward','fp_stop','fn_stop']
     for k in copy_keys:
         sequence_logs[k] = episode_data[k]
@@ -384,7 +385,10 @@ class ObjectNavOracle:
         return self.follower.get_next_action(best_target)
     
 class HabitatWorker:
-    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None,ep_seed=None,log_oracle=False):
+    def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None,ep_seed=None,log_oracle=False,
+                 explr_bonus = None,
+                 collision_penalty = None
+                 ):
         from habitat.config.default import get_config
         from habitat.config import read_write
         from habitat.config.default_structured_configs import (
@@ -410,6 +414,8 @@ class HabitatWorker:
             # nuclear option to ensure proper habitat loading
             import os
             os.chdir(workspace)
+        self.explr_bonus = explr_bonus
+        self.collision_penalty = collision_penalty
 
         self.postprocess = postprocess
         self.log_oracle = log_oracle
@@ -652,9 +658,15 @@ class HabitatWorker:
         if self.postprocess:
             step_dict = self._postprocess_step(step_dict)
             extras['+stuck'] = np.linalg.norm(np.array(self.last_step['info']['+pos_rots'])-np.array(step_dict['info']['+pos_rots']))<1e-5 # record collisions
-            if extras['+stuck']:
+            if extras['+stuck'] and self.collision_penalty is not None:
                 print("applying collision penalty")
-                step_dict['reward']-=0.05
+                step_dict['reward']-=self.collision_penalty #0.05
+            curr_explored_area = step_dict['info']['top_down_map']['fog_of_war_mask'].sum()
+            last_explored_area = self.last_step['info']['top_down_map']['fog_of_war_mask'].sum()
+            step_dict['+exploration_delta']=curr_explored_area-last_explored_area
+            print("applying exploration bonus")
+            if step_dict['+exploration_delta']>0 and self.explr_bonus is not None:
+                step_dict['reward']+=self.explr_bonus
         if self.enable_caching:
             extras["timestamp"] = time.time()
             if supplementary_logs is None:
@@ -1028,7 +1040,11 @@ class LoggingHabitatWorker(HabitatWorker):
         # 6. Send to Global Logger
         if self.logger_actor:
             import ray
-            ray.get(self.logger_actor.log_row.remote(row=payload))
+            try:
+                ray.get(self.logger_actor.log_row.remote(row=payload),timeout=1.0) 
+            except Exception as e:
+                print(f"having issue with logging ack! {e}")
+                # remove ray.get!
         return ep_path
 
     def reset(self, episode_id=None,output_schema=None,logging_schema=None):

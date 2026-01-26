@@ -125,6 +125,8 @@ class WandbLoggerActor:
         # --- 5. Conditional Commit ---
         if self.rows_since_last_commit >= self.commit_interval:
             log_payload["episode_details"] = self.table
+            # Reset table to prevent O(N^2) slowdown and race conditions
+            # self.table = wandb.Table(columns=self.columns, allow_mixed_types=True)
             self.rows_since_last_commit = 0 
             
         self.run.log(log_payload)
