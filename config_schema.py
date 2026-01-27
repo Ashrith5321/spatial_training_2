@@ -68,7 +68,10 @@ class RLAlgoConfig:
     gamma: float = 0.99
     lam: float = 0.95
 
-    time_kernel_sigma: float = 5.0
+    time_kernel_sigma: float = 50.0
+    time_alignment: str = "start" #or end
+    time_loto: bool = False # leave one trajectory out
+    
     distance_kernel_sigma: float = 0.5
     distance_clip_max: Optional[float] = 17.0
     distance_clip_percentile: Optional[float] = 0.95
@@ -116,6 +119,7 @@ class HydraLoraConfig:
     
     # modules_to_save is also a list, defaulting to None is fine for Hydra
     modules_to_save: Optional[List[str]] = None
+    use_rslora: bool = False #rank stabilized lora. should use?
 
 @dataclass
 class VLMTrainingConfig:
@@ -168,7 +172,8 @@ class HabitatConfig:
     })
     auto_flush: bool = True # automatically flush logs upon reset
     ep_seed: Optional[bool] = None # if set, episode iterators are deterministic with same set seed all habitat workers
-
+    explr_bonus: Optional[float] = 0.13
+    collision_penalty: Optional[float] = 0.05
 # --- Rollouts (both for Eval and RL) ---
 @dataclass
 class RolloutConfig:
@@ -214,4 +219,3 @@ class InferenceConfig:
 class RLConfig(InferenceConfig):
     training: VLMTrainingConfig = field(default_factory=VLMTrainingConfig)
     hab_config_list: Optional[List] = None
-    
