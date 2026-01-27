@@ -213,3 +213,5 @@ class InferenceConfig:
 @dataclass
 class RLConfig(InferenceConfig):
     training: VLMTrainingConfig = field(default_factory=VLMTrainingConfig)
+    hab_config_list: Optional[List] = None
+    

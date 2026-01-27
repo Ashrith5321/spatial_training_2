@@ -10,6 +10,7 @@ import verl.utils.torch_functional as verl_F
 import torch.nn.functional as F
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo.core_algos import register_adv_est
+import time
 
 def collate_trajectories(trajectory_list: list[dict], device='cpu'):
     """
@@ -174,6 +175,7 @@ def collect_rollouts(
     log_dict = {}
     iterator_exhausted = False
 
+    last_dispatch_time = time.time()
     # --- 3. Bootstrap: Initial Sharding & Resets (IDENTICAL) ---
     for sim_handle in sim_handles:
         try:
@@ -192,7 +194,7 @@ def collect_rollouts(
     # Helper to check if we should keep the loop alive
     def has_work():
         # 1. Are tasks currently running?
-        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0
+        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0 #or len(pending_logs) > 0
         # 2. Do we still want to launch new tasks (now or in the future)? (Resources available AND Target not met)
         potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
         want_launch = (potential < target_episodes) and (not iterator_exhausted) 
@@ -223,8 +225,24 @@ def collect_rollouts(
         if not all_watch_refs:
             break
 
-        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1)
-        
+        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1,timeout=15.0)
+        if not ready_refs:
+            # If we get here, the orchestrator is "stuck" waiting.
+            # We can use this moment to diagnose.
+            
+            # Simple deadlock detector:
+            current_time = time.time()
+            if current_time - last_dispatch_time > 360: # 6 minutes
+                print(f"DEBUG: System frozen for >6m. Active: {len(active_episodes)}, PostProc: {len(pending_postproc)}")
+                
+                # Check 1: Are we waiting on a specific ref forever?
+                # Dump the first few active refs to inspect
+                import ipdb; ipdb.set_trace() 
+            
+            continue # Jump back to start of loop (and potentially dispatch more if resources freed up)
+
+        # CHANGE 3: Update timestamp when we actually get a result
+        last_dispatch_time = time.time()
         for ref in ready_refs:
             
             # --- CASE 1: Reset Finished ---
@@ -234,6 +252,7 @@ def collect_rollouts(
             
             # --- CASE 2: Episode Finished ---
             elif ref in active_episodes:
+                # print("handling finished episode")
                 dispatch_id =  active_episodes.pop(ref)
                 # Unpack results
                 vlm, sim, is_exhausted, state = ray.get(ref)
@@ -260,9 +279,12 @@ def collect_rollouts(
                 log_dict[dispatch_id] = ref # save the path to the log
                 # send the sim to reset/reshard so it can start working again asap
                 try:
+                    # print("logging done",end="")
                     if is_exhausted:
+                        # print("assigning shard")
                         new_shard = next(shard_iterator)
                         sim.assign_shard.remote(new_shard)
+                    # print("resetting sim")
                     new_reset_ref = sim.reset.remote()
                     pending_resets[new_reset_ref] = sim
                 except StopIteration:
@@ -548,12 +570,12 @@ class BinnedKernelCritic:
         return preds.view(original_shape)
     
 @register_adv_est("reinforce_plus_plus_time_kernel")
-def compute_reinforce_plus_plus_linear_time_aware_advantage(
+def compute_reinforce_plus_plus_time_kernel_advantage(
     token_level_rewards: torch.Tensor, 
     response_mask: torch.Tensor, 
     config: Optional[AlgoConfig] = None, 
-    k_bandwidth: Optional[int] = 5000,
-    kernel_sigma: Optional[float] = 5.0,
+    k_bandwidth: Optional[int] = None, #prev 5000, seem too small. 8000 should be good?
+    kernel_sigma: Optional[float] = 60.0,
     alignment="start",
     **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -588,8 +610,7 @@ def compute_reinforce_plus_plus_linear_time_aware_advantage(
         advantages = returns - baseline
         advantages = verl_F.masked_whiten(advantages, response_mask)
         advantages = advantages * response_mask
-
-    return advantages, returns
+    return advantages, returns, baseline
 
 @register_adv_est("reinforce_plus_plus_linear_time_aware")
 def compute_reinforce_plus_plus_linear_time_aware_advantage(
