@@ -76,6 +76,7 @@ def main(cfg: RLConfig):
             ray.kill(sim)
         if wandb_actor is not None:
             ray.get(wandb_actor.close.remote())
+            time.sleep(180)
             ray.kill(wandb_actor)
         ray.shutdown()
 
@@ -104,6 +105,8 @@ def main(cfg: RLConfig):
         pickle_obj(result_list, f"result_{i}")
         pickle_obj(log_list,f"logpaths_{i}")
     ray.get(log_list)
+    import time
+    time.sleep(360)
     cleanup()
 
 if __name__ == "__main__":
