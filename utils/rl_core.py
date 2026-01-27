@@ -575,8 +575,9 @@ def compute_reinforce_plus_plus_time_kernel_advantage(
     response_mask: torch.Tensor, 
     config: Optional[AlgoConfig] = None, 
     k_bandwidth: Optional[int] = None, #prev 5000, seem too small. 8000 should be good?
-    kernel_sigma: Optional[float] = 60.0,
+    kernel_sigma: Optional[float] = 30.0,
     alignment="start",
+    loto: bool = False,
     **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -584,13 +585,18 @@ def compute_reinforce_plus_plus_time_kernel_advantage(
     """
     assert config is not None
     gamma = config.gamma
+    alignment = config.get("time_alignment", alignment)
+    kernel_sigma = config.get("time_kernel_sigma", kernel_sigma)
+    loto = config.get("time_loto", loto)
     device = token_level_rewards.device
     with torch.no_grad():
         returns = torch.zeros_like(token_level_rewards)
         running_return = 0
-        traj_ids = torch.arange(token_level_rewards.shape[0], device=device).unsqueeze(1).expand(-1, token_level_rewards.shape[1])
-        traj_ids = traj_ids[response_mask.bool()] #flatten
-        
+        if loto:
+            traj_ids = torch.arange(token_level_rewards.shape[0], device=device).unsqueeze(1).expand(-1, token_level_rewards.shape[1])
+            traj_ids = traj_ids[response_mask.bool()] #flatten
+        else:
+            traj_ids = None
         time = torch.arange(token_level_rewards.shape[1], device=device).unsqueeze(0).expand(token_level_rewards.shape[0], -1)
         if alignment=="end":
             seq_lengths = response_mask.sum(dim=-1)

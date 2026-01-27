@@ -166,8 +166,12 @@ def main(cfg: RLConfig):
             advantages, returns = adv_tuple[0],adv_tuple[1]
             if len(adv_tuple)>2:
                 traj_batch['baseline'] = adv_tuple[2]
+                print("DEBUG: computing variances")
+                print(f"Rtn Var: {(returns[traj_batch['response_mask']==1]).var().item():.4f}")
+                print(f"MSE Error: {((traj_batch['baseline'][traj_batch['response_mask']==1]-returns[traj_batch['response_mask']==1])**2).mean().item():.4f}")
             traj_batch['advantages'] = advantages
             traj_batch['returns'] = returns
+            global_return_mean = returns[traj_batch['response_mask']==1].mean().item()
             traj_batch = traj_batch[-bootstrapper.typed_cfg.training.rl_config.n_rollout:] # only train on most recent.
             print(f"Advantage Mean: {advantages.mean().item():.4f}, Std: {advantages.std().item():.4f}")
 
@@ -251,9 +255,11 @@ def main(cfg: RLConfig):
                             "rollout/global_cycle": global_cycle
                         }
                         try:
-                            mse = ((traj_stats['baseline']-traj_stats['returns'])**2).mean()
+                            critic_mse = ((traj_stats['baseline']-traj_stats['returns'])**2).mean()
+                            naive_mse = ((traj_stats['returns'] - global_return_mean)**2).mean().item()
                             rollout_stats |= {
-                                "rollout/baseline_mse":mse
+                                "rollout/baseline_mse":critic_mse,
+                                "rollout/naive_mse":naive_mse
                             }
                         except:
                             print("cannot compute baseline metric")

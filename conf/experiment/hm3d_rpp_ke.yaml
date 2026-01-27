@@ -1,6 +1,6 @@
 # @package _global_
 task:
-  run_name: hm3d_ovon_rpp_ke
+  run_name: hm3d_rpp_ke_standard
   wandb_project: rl_train
   shard_size: 0
   subset_label: ""
@@ -22,12 +22,7 @@ resources:
   sim_gpu_fraction: 0.14
   vlm_cpus: 4
   sim_cpus: 4
-hab_config_list: #jank, 2:3 mixture of data
-  - conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
-  - conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
-  - conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
-  - conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
-  - conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
+
 rollout:
   max_steps: 350
   temperature: 1.0
@@ -51,7 +46,7 @@ vlm:
   use_sparse: true
   save_outputs: true
 sim:
-  config_path: /Projects/spatial_training/conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
+  config_path: conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
   workspace: null
   scenes_dir: null
   split: train
@@ -73,7 +68,7 @@ sim:
     fp_stop: true
   auto_flush: false
   ep_seed: null
-  explr_bonus: 0.1
+  explr_bonus: 0.03
   collision_penalty: 0.02
 training:
   checkpoint: null
@@ -84,7 +79,7 @@ training:
   mixed_precision: 'no'
   gradient_checkpointing: true
   total_optimization_steps: 20000
-  warmup_steps: 128
+  warmup_steps: 32
   save_step: 8
   value_head_learning_rate: 0.0005
   value_head_dropout: 0.0
@@ -127,9 +122,11 @@ training:
     gamma: 0.95
     lam: 0.95
     cliprange_value: 0.2
-    entropy_bonus: 0.0
+    entropy_bonus: 0.002
     use_ref: true
     kl_coeff: 0.001
     kl_target: 0.1
     global_batch_info: {}
+    time_kernel_sigma: 40.0
+    time_loto: false
   sft_config: null
