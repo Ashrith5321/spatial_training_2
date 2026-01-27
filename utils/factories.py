@@ -242,7 +242,6 @@ class ExpBootstrapper:
         system_config = {
             # "automatic_object_spilling_enabled": False,
         }
-        osm = 500 * 1024 * 1024 * 1024
         if res.ray_address == "local":
             ray.init(
                 resources={
@@ -250,7 +249,7 @@ class ExpBootstrapper:
                     res.sim_resource_tag: res.num_sims,
                 },
                 ignore_reinit_error=True,
-                object_store_memory = osm,
+                object_store_memory = res.osm_gb * 1024 * 1024 * 1024,
                 object_spilling_directory = res.object_spilling_directory, _system_config=system_config,
             )
         else:

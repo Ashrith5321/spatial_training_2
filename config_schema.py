@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any
 class ResourceConfig:
     ray_address: str = "local"
     object_spilling_directory: str = "./ray_object_spilling"
+    osm_gb: int = 250  # Object Store Memory in GB
     vlm_resource_tag: str = "env_a"
     sim_resource_tag: str = "env_b"
     master_addr: str = 'localhost'

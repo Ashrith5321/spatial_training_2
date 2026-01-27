@@ -1,10 +1,10 @@
 # @package _global_
 task:
-  run_name: override_me
+  run_name: ovon_eval_dedup
   wandb_project: "rl_eval"
-  shard_size: 0
-  subset_label: "sample400_a"
-  episode_json: ''
+  shard_size: 6
+  subset_label: ""
+  episode_json: conf/episode_jsons/ovon_val_unseen.json
   output_dir: ./dump/rl_eval
   jobtype: eval
 resources:
@@ -14,8 +14,8 @@ resources:
   sim_resource_tag: env_b
   master_addr: localhost
   master_port: null
-  num_vlms: 1
-  num_sims: 2
+  num_vlms: 3
+  num_sims: 4
   vlm_conda_env: vlm_node_1016
   habitat_conda_env: vln
   vlm_gpu_fraction: 0.7

@@ -560,6 +560,7 @@ class HabitatWorker:
             self.env.close()
         self.steps = defaultdict(list)
         self.last_step = None
+        self.reset_flag = False
         self.assigned_labels = set(assigned_episode_labels) if assigned_episode_labels is not None else None
 
         if self.assigned_labels is not None:
@@ -626,7 +627,7 @@ class HabitatWorker:
             supplementary logs: dict of extra info to log for this step. useful for recording action logprobs, agent inference latency, etc
                 - WARNING: if you provide this, you MUST provide it every step, with the same keys. otherwise your data won't align properly!
         """
-
+        self.reset_flag = False
         extras = {'+fp_stop':-99999*int(not self.fp_guard),'+fn_stop':-99999*int(not self.fn_guard)} # massive neg for not enabled, 0 for enabled but not triggerd.
         # oracle stop guards useful for reducin eval noise. #TODO: use habitat config instead of magic number
         try:
@@ -692,7 +693,16 @@ class HabitatWorker:
     def get_episodes(self):
         return self.env.episodes
     
-    def reset(self, episode_id=None,output_schema=None,logging_schema=None):
+    def export_dataset_labels(self):
+        """Exports the list of episode labels in the current shard."""
+        labels = []
+        for episode in self.full_dataset.episodes:
+            scene_id = get_scene_id(episode.scene_id)
+            episode_label = f'{scene_id}_{episode.episode_id}'
+            labels.append(episode_label)
+        return labels
+    
+    def _reset(self, episode_id=None,output_schema=None,logging_schema=None):
         """
         Args:
             episode_id: please don't try this.
@@ -729,7 +739,18 @@ class HabitatWorker:
         if self.enable_caching:
             self._cache_step(self._apply_schema(step_dict,self.logging_schema) | {"timestamp": time.time()})
         self.last_step = step_dict
+        self.reset_flag = True
         return self._apply_schema(step_dict,self.output_schema)
+    
+    def reset(self, episode_id=None,output_schema=None,logging_schema=None,allow_skip=False):
+        if self.reset_flag and self.last_step is not None and not allow_skip:
+            # use cached last step if no steps taken yet, prevents duplicate resets from wasting time or skipping episodes
+            if output_schema is not None:
+                self.output_schema = output_schema
+            if logging_schema is not None:
+                self.logging_schema = logging_schema
+            return self._apply_schema(self.last_step,self.output_schema) 
+        return self._reset(episode_id,output_schema,logging_schema)
 
     def save_video(self, output_dir, fps=4,quality = 3):
         filename = self.steps['info'][0]['episode_label']
@@ -1035,6 +1056,7 @@ class LoggingHabitatWorker(HabitatWorker):
             **episode_logs,           
         }
         if clear_steps:
+            self.reset_flag = False
             self.steps = defaultdict(list)  # Clear video cache for new episode
 
         # 6. Send to Global Logger
