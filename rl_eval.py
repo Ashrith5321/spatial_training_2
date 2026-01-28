@@ -20,6 +20,7 @@ NOTE: tab completion only works if your command uses python not python3. somehow
 
 from pathlib import Path
 import sys
+import math
 # _ROOT = Path(__file__).resolve().parents[1]
 # if str(_ROOT) not in sys.path:
 #     sys.path.insert(0, str(_ROOT))
@@ -94,7 +95,7 @@ def main(cfg: RLConfig):
     
     # ------------------------------------------- rollouts ------------------------------------------
     batch_size = 16 # fixed batch size decoupled from RL logic for eval
-    for i in range(max(len(all_episodes)//batch_size,1)):
+    for i in range(max(math.ceil(len(all_episodes)/batch_size),1)):
         logger.info("Starting rollout collection!")
         # bootstrapper.typed_cfg.training.rl_config.n_rollout
         rollout_list,result_list,log_list = collect_rollouts(sims,trainers,shard_iter,batch_size,{"return_inputs":False,"eval":True}) #

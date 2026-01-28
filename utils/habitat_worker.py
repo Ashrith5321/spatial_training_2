@@ -457,7 +457,7 @@ class HabitatWorker:
                     draw_shortest_path=True,
                     draw_view_points=True,
                     draw_border=True,
-                    fog_of_war=FogOfWarConfig(draw=True, visibility_dist=5, fov=79),
+                    fog_of_war=FogOfWarConfig(draw=True, visibility_dist=15, fov=79),
                 )
             )
 

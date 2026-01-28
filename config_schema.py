@@ -195,6 +195,8 @@ class RolloutConfig:
         {"role": "user", "content": [{"type": "image"}]},
         {"role": "assistant", "content": [{"type": "text", "text": "**forward**"}]}
     ])
+    stop_prob_threshold: Optional[float] = None
+
 
 # --- Experiment housekeeping ---
 @dataclass
