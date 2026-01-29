@@ -133,11 +133,18 @@ class EpisodeRolloutMixin:
                 # print(messages)
                 t0 = time.time()
                 action_probs,action_logprobs,outputs = self.infer_probs(images=[rgb_pil],messages=messages,temperature = self.rollout_config['temperature'],pos_id_kwargs=pos_id_kwargs)
-                vlm_logs |= {'mean/vlm_latency':time.time()-t0,'min/vlm_latency':time.time()-t0,'max/vlm_latency':time.time()-t0}
+                vlm_logs |= {'mean/vlm_latency':time.time()-t0,'min/vlm_latency':time.time()-t0,'max/vlm_latency':time.time()-t0,'sum/spguard_trigger_count':0}
                 # print(f"vlm step{step_count}")
                 # print("done")
                 #except for the first turn, all messages follow the exact same template.
                 action_id = np.random.choice(len(action_probs),p=action_probs) # sampling
+                if action_id ==0 and self.rollout_config['stop_prob_threshold'] is not None:
+                    if action_probs[0] >= self.rollout_config['stop_prob_threshold']:
+                        action_id = 0
+                    else:
+                        vlm_logs['sum/spguard_trigger_count']=1
+                        action_id = np.random.choice(len(action_probs)-1,p=action_probs[1:]/np.sum(action_probs[1:]))+1
+                    
                 oracle_action_id = state_dict['info'].get('oracle_action',-1) # only update temporally afterwards
 
                 entropy = -np.sum(action_probs * np.log(action_probs + 1e-9))
