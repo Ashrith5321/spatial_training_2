@@ -133,7 +133,13 @@ class EpisodeRolloutMixin:
                 # print(messages)
                 t0 = time.time()
                 action_probs,action_logprobs,outputs = self.infer_probs(images=[rgb_pil],messages=messages,temperature = self.rollout_config['temperature'],pos_id_kwargs=pos_id_kwargs)
+                
                 vlm_logs |= {'mean/vlm_latency':time.time()-t0,'min/vlm_latency':time.time()-t0,'max/vlm_latency':time.time()-t0,'sum/spguard_trigger_count':0}
+                try:
+                    import torch
+                    vlm_logs |= {"vlm_mem_GB":torch.cuda.memory_allocated()/(1024**3)}
+                except:
+                    print("warning: could not get vlm mem")
                 # print(f"vlm step{step_count}")
                 # print("done")
                 #except for the first turn, all messages follow the exact same template.
@@ -410,6 +416,7 @@ class RLRayWorker(RLWorker):
             },
             loss_weights=[rl_weight, bc_weight]
         )
+        
 class HabitatRayWorker(LoggingHabitatWorker):
     """
     Ray Actor wrapper for the LoggingHabitatWorker.

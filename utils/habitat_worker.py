@@ -206,7 +206,7 @@ def supplementary_logging_helper(episode_data,result_row):
         "sum": np.sum,
         "prod": np.prod
     }
-
+    sequence_logs = {}
     for key, values in episode_data.items():
         if key.startswith("sup/"):
             try:
@@ -223,13 +223,18 @@ def supplementary_logging_helper(episode_data,result_row):
                     # or keep original key "sup/mean/entropy" if you prefer explicit naming.
                     # Here we keep the full key to avoid collision (e.g. mean/x vs max/x)
                     result_row[f"sup/{reduction_type}_{metric_name}"] = scalar_result
-            except ValueError:
-                # Malformed key (e.g. "sup/broken_format"), skip it
-                continue
+                    sequence_logs[metric_name] = val_array.tolist()
+                else:
+                    sequence_logs[key] = values # non reduced logs
             except Exception as e:
+                try:
+                    sequence_logs[key] = values # non reduced logs
+                except:
+                    print(f"Failed to log user key {key}: {e}")
                 # Value error (e.g. non-numeric data in reduction), skip it
                 print(f"Failed to reduce user key {key}: {e}")
                 continue
+    return sequence_logs
 
 def habitat_logging_helper(episode_data,summary_schema):
     '''
@@ -257,13 +262,14 @@ def habitat_logging_helper(episode_data,summary_schema):
     episode_logs['fpg_trigger_count'] = np.sum(np.array(episode_data['fp_stop'])) #works thanks to defaultdict shenanigans
     episode_logs['fng_trigger_count'] = np.sum(np.array(episode_data['fn_stop'])) #works thanks to defaultdict shenanigans
 
+    episode_logs['last_action_prob'] = episode_data.get('sup/mean/action_prob',[0])[-1] #get last action probs if available
     # sequence level logs
     raw_collisions = episode_data.get('stuck',[]) #this is already aligned to actions, no need to slice. 
     # auxiliary performance metrics
     episode_logs['collision_rate'] = np.sum(np.array(raw_collisions))/episode_logs['n_steps']
     episode_logs['mean_distance_reward'] = np.mean(np.array(episode_data['reward'][1:-1])) # slice to exclude the terminal reward
     # save the video.
-    supplementary_logging_helper(episode_data,episode_logs)
+    supplementary_sequence_logs = supplementary_logging_helper(episode_data,episode_logs)
 
     sequence_logs = {}
     sequence_logs['action_history'] = episode_data['action']
@@ -274,6 +280,7 @@ def habitat_logging_helper(episode_data,summary_schema):
     copy_keys = ['reward','fp_stop','fn_stop']
     for k in copy_keys:
         sequence_logs[k] = episode_data[k]
+    sequence_logs|=supplementary_sequence_logs
 
     return episode_logs, sequence_logs
 
