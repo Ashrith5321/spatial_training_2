@@ -175,6 +175,7 @@ class HabitatConfig:
     ep_seed: Optional[bool] = None # if set, episode iterators are deterministic with same set seed all habitat workers
     explr_bonus: Optional[float] = 0.13
     collision_penalty: Optional[float] = 0.05
+    fpstop_penalty: Optional[float] = 0.3
 # --- Rollouts (both for Eval and RL) ---
 @dataclass
 class RolloutConfig:

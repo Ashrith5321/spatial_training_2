@@ -387,7 +387,8 @@ class ObjectNavOracle:
 class HabitatWorker:
     def __init__(self, assigned_episode_labels=None,workspace='/Projects/SG_VLN_HumanData/SG-VLN', config_path="configs/objectnav_hm3d_rgbd_semantic.yaml", enable_caching=True,dataset_path = None, scenes_dir=None,split="val",postprocess= True,output_schema=None,logging_schema=None,fn_guard=False,fp_guard=False,voxel_kwargs=None,ep_seed=None,log_oracle=False,
                  explr_bonus = None,
-                 collision_penalty = None
+                 collision_penalty = None,
+                 fpstop_penalty = None
                  ):
         from habitat.config.default import get_config
         from habitat.config import read_write
@@ -416,7 +417,7 @@ class HabitatWorker:
             os.chdir(workspace)
         self.explr_bonus = explr_bonus
         self.collision_penalty = collision_penalty
-
+        self.fpstop_penalty = fpstop_penalty
         self.postprocess = postprocess
         self.log_oracle = log_oracle
         self.enable_caching = enable_caching
@@ -457,7 +458,7 @@ class HabitatWorker:
                     draw_shortest_path=True,
                     draw_view_points=True,
                     draw_border=True,
-                    fog_of_war=FogOfWarConfig(draw=True, visibility_dist=15, fov=79),
+                    fog_of_war=FogOfWarConfig(draw=True, visibility_dist=20, fov=79),
                 )
             )
 
@@ -668,6 +669,9 @@ class HabitatWorker:
             print("applying exploration bonus")
             if step_dict['+exploration_delta']>0 and self.explr_bonus is not None:
                 step_dict['reward']+=self.explr_bonus
+            if action==0 and info['distance_to_goal']>self.config_env.habitat.task.measurements.success.success_distance:
+                if self.fpstop_penalty is not None:
+                    step_dict['reward']-=self.fpstop_penalty
         if self.enable_caching:
             extras["timestamp"] = time.time()
             if supplementary_logs is None:
