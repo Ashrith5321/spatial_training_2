@@ -656,33 +656,13 @@ class VLMTrainingMixin:
             from verl.trainer.ppo.core_algos import get_policy_loss_fn
             self.policy_loss_fn = get_policy_loss_fn(config.rl_config.policy_loss_name)
         # 4. Apply PEFT (if config provided)
-        if config.peft_config is not None:
-            if not PEFT_AVAILABLE:
-                raise ImportError("TrainConfig has peft_config, but 'peft' library is not installed.")
-            from peft import LoraConfig
-            from dataclasses import asdict
-            # Direct application of the config object
-            # CRITICAL: Add 'value_head' to modules_to_save so PEFT treats it as 
-            # a full-rank trainable module (not an adapter) and saves it in the checkpoint.
-            if config.peft_config.modules_to_save is None:
-                config.peft_config.modules_to_save = []
-            if "value_head" not in config.peft_config.modules_to_save:
-                config.peft_config.modules_to_save.append("value_head")
-            try:
-                peft_kwargs = asdict(config.peft_config)
-            except:
-                from omegaconf import OmegaConf
-                peft_kwargs = OmegaConf.to_container(config.peft_config,resolve=True)
-            for key in ["target_modules", "modules_to_save", "modules_to_freeze"]:
-                if key in peft_kwargs and peft_kwargs[key] is not None:
-                    # The magic fix: list() casts ListConfig -> list
-                    peft_kwargs[key] = list(peft_kwargs[key])
-
-            real_peft_config = LoraConfig(**peft_kwargs)
-            self.model = get_peft_model(self.model, real_peft_config)
+        self._setup_peft(config)
             # Print trainable parameters to verify LoRA is active
+        try:
             if self.accelerator.is_local_main_process:
                 self.model.print_trainable_parameters()
+        except:
+            print("failed to print trainable parameters...")
         # 5. Create Optimizer
         # Only optimize parameters that require gradients (i.e., the Adapters)
         print(f"accelerator device: {self.accelerator.device}")
@@ -723,7 +703,33 @@ class VLMTrainingMixin:
 
         if config.checkpoint is not None:
             self.load_checkpoint(config.checkpoint,True,config.load_optim,config.load_sched)
+    def _setup_peft(self, config):
+        if config.peft_config is not None:
+            if not PEFT_AVAILABLE:
+                raise ImportError("TrainConfig has peft_config, but 'peft' library is not installed.")
+            from peft import LoraConfig
+            from dataclasses import asdict
+            # Direct application of the config object
+            # CRITICAL: Add 'value_head' to modules_to_save so PEFT treats it as 
+            # a full-rank trainable module (not an adapter) and saves it in the checkpoint.
+            if config.peft_config.modules_to_save is None:
+                config.peft_config.modules_to_save = []
+            if "value_head" not in config.peft_config.modules_to_save:
+                config.peft_config.modules_to_save.append("value_head")
+            try:
+                peft_kwargs = asdict(config.peft_config)
+            except:
+                from omegaconf import OmegaConf
+                peft_kwargs = OmegaConf.to_container(config.peft_config,resolve=True)
+            for key in ["target_modules", "modules_to_save", "modules_to_freeze"]:
+                if key in peft_kwargs and peft_kwargs[key] is not None:
+                    # The magic fix: list() casts ListConfig -> list
+                    peft_kwargs[key] = list(peft_kwargs[key])
 
+            real_peft_config = LoraConfig(**peft_kwargs)
+            self.model = get_peft_model(self.model, real_peft_config)
+        else:
+            print("PEFT config not provided; training all model parameters.")
     def train_sft_step(self, batch):
         """
         Standard training step.

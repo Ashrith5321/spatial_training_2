@@ -619,6 +619,8 @@ class HabitatWorker:
             self.output_schema = self._generate_auto_schema(True)
         if self.logging_schema is None:
             self.logging_schema = self._generate_auto_schema(True)
+        if self.logging_schema == "light":
+            self.logging_schema = self._generate_auto_schema(False)
         self.summary_schema=self._generate_auto_schema()['info']
 
         print(f"Actor assigned with shard of {len(dataset.episodes)} episodes.")
@@ -982,6 +984,7 @@ class LoggingHabitatWorker(HabitatWorker):
         logging_output_dir: str,
         logger_actor: Any = None,
         auto_flush = True,
+        minimal_logging = True,
         **kwargs
     ):
         from pathlib import Path
@@ -992,6 +995,7 @@ class LoggingHabitatWorker(HabitatWorker):
         super().__init__(*args, **kwargs)
         self.auto_flush = auto_flush
         self.logger_actor = logger_actor
+        self.minimal_logging = minimal_logging
         os.makedirs(self.log_dir, exist_ok=True)
 
     def _flush_logs_to_disk(self,clear_steps = True):
@@ -1019,24 +1023,24 @@ class LoggingHabitatWorker(HabitatWorker):
     
         # 3. Generate & Save Video + Thumbnail
         # Uses your helper. Returns (video_path_string, PIL_Image)
-        vid_path, thumb_img = save_run_video(
-            steps_data=self.steps,
-            filename="video", # save_run_video adds extension
-            output_dir=save_dir,
-            quality=4,
-            return_thumbnail=True
-        )
+        if not self.minimal_logging:
+            vid_path, thumb_img = save_run_video(
+                steps_data=self.steps,
+                filename="video", # save_run_video adds extension
+                output_dir=save_dir,
+                quality=4,
+                return_thumbnail=True
+            )
+            episode_logs["vid/episode_video"] = vid_path  # Path for WandB Video
+            seq_path = os.path.join(save_dir, "sequence.json")
+            episode_logs["raw/trace"] =  seq_path          # Path for WandB Artifact/File
+            # Manually save the thumbnail object to disk
+            thumb_path = os.path.join(save_dir, "thumbnail.jpg")
+            Image.fromarray(thumb_img).save(thumb_path, quality=85)
+            episode_logs["img/thumbnail"] = thumb_path    # Path for WandB Image
         
-        # Manually save the thumbnail object to disk
-        thumb_path = os.path.join(save_dir, "thumbnail.jpg")
-        Image.fromarray(thumb_img).save(thumb_path, quality=85)
-        seq_path = os.path.join(save_dir, "sequence.json")
         ep_path = os.path.join(save_dir,"summary.json")
 
-        episode_logs["vid/episode_video"] = vid_path  # Path for WandB Video
-        episode_logs["raw/trace"] =  seq_path          # Path for WandB Artifact/File
-        episode_logs["img/thumbnail"] = thumb_path    # Path for WandB Image
-       
         episode_logs |= {
              "worker_pid": os.getpid(),
             "node": os.uname().nodename,
@@ -1050,9 +1054,10 @@ class LoggingHabitatWorker(HabitatWorker):
             if isinstance(obj, np.floating): return float(obj)
             if isinstance(obj, np.ndarray): return obj.tolist()
             return str(obj)
-
-        with open(seq_path, 'w') as f:
-            json.dump(sequence_logs, f, default=default_serializer,indent=4)
+        if not self.minimal_logging:
+            # sequence logs are heavy
+            with open(seq_path, 'w') as f:
+                json.dump(sequence_logs, f, default=default_serializer,indent=4)
 
         with open(os.path.join(self.log_dir,f"results_{os.getpid()}"),'a') as f:
             f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result

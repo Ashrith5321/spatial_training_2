@@ -20,6 +20,7 @@ thread_cap_env = {
         "MAGNUM_LOG": "quiet",
         "TOKENIZERS_PARALLELISM": "false",
         "HF_ENABLE_PARALLEL_LOADING": "false",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     }
 }
 
@@ -253,7 +254,7 @@ class ExpBootstrapper:
                 object_spilling_directory = res.object_spilling_directory, _system_config=system_config,
             )
         else:
-            ray.init(address=res.ray_address, ignore_reinit_error=True,_system_config=system_config,object_store_memory=osm)
+            ray.init(address=res.ray_address, ignore_reinit_error=True,_system_config=system_config)#,object_store_memory=res.osm_gb * 1024 * 1024 * 1024)
     def bootstrap_logger(self):
         save_hydra_config(self.typed_cfg,os.path.join(self.typed_cfg.task.output_dir,self.typed_cfg.task.run_name))
         return WandbFactory.create(
@@ -287,6 +288,13 @@ class ExpBootstrapper:
         if training:
             futures = RLWorkerFactory._enable_training(workers,self.typed_cfg.resources,self.typed_cfg.training)
             ray.get(futures)
+        else:
+            print("⚠️ Skipping training setup for RL workers.")
+            if self.typed_cfg.training.checkpoint is not None:
+                print("loading checkpoint for eval")
+                for worker in workers:
+                    ray.get(worker._setup_peft.remote(self.typed_cfg.training))
+                    ray.get(worker.load_checkpoint.remote(self.typed_cfg.training.checkpoint,False,False))
         return workers
     
     def bootstrap_sims(self,logger=None):

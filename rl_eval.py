@@ -51,7 +51,7 @@ def main(cfg: RLConfig):
     logger = get_console_logger()
 
     bootstrapper.setup_cluster()
-    trainers = bootstrapper.bootstrap_vlms_rl() #allocate vlms first to prevent out of room issues
+    trainers = bootstrapper.bootstrap_vlms_rl(training=False) #allocate vlms first to prevent out of room issues
     wandb_actor = bootstrapper.bootstrap_logger()
     sim_logger = wandb_actor
     sims = bootstrapper.bootstrap_sims(sim_logger)
@@ -94,7 +94,7 @@ def main(cfg: RLConfig):
             pickle.dump(obj,f)
     
     # ------------------------------------------- rollouts ------------------------------------------
-    batch_size = 16 # fixed batch size decoupled from RL logic for eval
+    batch_size = 32 # fixed batch size decoupled from RL logic for eval
     for i in range(max(math.ceil(len(all_episodes)/batch_size),1)):
         logger.info("Starting rollout collection!")
         # bootstrapper.typed_cfg.training.rl_config.n_rollout
@@ -102,9 +102,9 @@ def main(cfg: RLConfig):
         if len(rollout_list) == 0:
             break
         # save for analysis
-        pickle_obj(rollout_list, f"rollout_{i}")
-        pickle_obj(result_list, f"result_{i}")
-        pickle_obj(log_list,f"logpaths_{i}")
+        # pickle_obj(rollout_list, f"rollout_{i}")
+        # pickle_obj(result_list, f"result_{i}")
+        # pickle_obj(log_list,f"logpaths_{i}")
     ray.get(log_list)
     import time
     time.sleep(360)
