@@ -189,21 +189,20 @@ def collect_rollouts(
             print("Warning: Not enough shards for all workers during bootstrap.")
             pass
     print(f"Bootstrapping: Initializing {len(sim_handles)} environments...")
-
-    
+    initial_live_sims = len(pending_resets)
     # Helper to check if we should keep the loop alive
     def has_work():
+
         # 1. Are tasks currently running?
-        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0 #or len(pending_logs) > 0
+        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0#or len(pending_logs) > 0
         # 2. Do we still want to launch new tasks (now or in the future)? (Resources available AND Target not met)
         potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
-        want_launch = (potential < target_episodes) and (not iterator_exhausted) 
+        want_launch = (potential < target_episodes) and initial_live_sims > 0
         return is_active or want_launch
     
     dispatch_counter = 0
     # --- Event Loop ---
     while has_work():
-        
         # A. Dispatch (IDENTICAL)
         total_potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
         

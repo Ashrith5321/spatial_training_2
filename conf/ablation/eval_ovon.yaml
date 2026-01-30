@@ -1,28 +1,27 @@
 # @package _global_
 task:
-  run_name: mp3d_final
-  wandb_project: "rl_eval"
+  run_name: checkpoint7700
+  wandb_project: "new_rl_ovon_full"
   shard_size: 6
   subset_label: ""
-  episode_json: "conf/episode_jsons/mp3d_val.json"
+  episode_json: "conf/episode_jsons/ovon_val_seen_synonyms.json"
   output_dir: ./dump/rl_eval
   jobtype: eval
 resources:
-  ray_address: local
+  ray_address: 10.164.33.175:6353
   object_spilling_directory: ./ray_object_spilling
   vlm_resource_tag: env_a
   sim_resource_tag: env_b
   master_addr: localhost
   master_port: null
-  num_vlms: 18
-  num_sims: 20
-  vlm_conda_env: vlm_node_1016
-  habitat_conda_env: vln
-  vlm_gpu_fraction: 0.3
-  sim_gpu_fraction: 0.024
+  num_vlms: 4
+  num_sims: 5
+  vlm_conda_env: null
+  habitat_conda_env: null
+  vlm_gpu_fraction: 0.6
+  sim_gpu_fraction: 0.1
   vlm_cpus: 4
   sim_cpus: 4
-  # osm_gb: 200
 rollout:
   max_steps: 500
   temperature: 1.0
@@ -33,7 +32,6 @@ rollout:
   - forward
   - left
   - right
-  stop_prob_threshold: 0.16
 vlm:
   model_id: "Qwen/Qwen3-VL-2B-Instruct"
   attn_impl: flash_attention_2
@@ -47,11 +45,11 @@ vlm:
   use_sparse: true
   save_outputs: true
 sim:
-  config_path: conf/habitat/objectnav_mp3d_rgbd.yaml
+  config_path: conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
   workspace: null
   scenes_dir: null
-  split: val
-  fp_guard: false
+  split: val_seen_synonyms
+  fp_guard: true
   fn_guard: false
   voxel_kwargs: null
   output_schema:
@@ -70,7 +68,7 @@ sim:
   auto_flush: false
   ep_seed: 17
 training:
-  checkpoint: Aasdfip/hm3d_rpp_ke_standard-checkpoint_231
+  checkpoint: null
   load_optim: false
   load_sched: false
   learning_rate: 1.0e-05

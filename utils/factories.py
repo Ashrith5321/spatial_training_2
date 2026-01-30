@@ -221,15 +221,31 @@ class WandbFactory:
             num_cpus=0, 
             runtime_env={"conda": res_cfg.vlm_conda_env}
         )
-
+        import wandb
+        api = wandb.Api()
+        # fetch latest run id matching name
+        id = None
+        runs = api.runs(run_cfg.wandb_project,filters={"displayName":run_cfg.run_name})
+        episodes_to_skip = set()
+        if len(runs) > 0:
+            # Sort runs by creation time descending      
+            latest_run = runs[-1] #defualt wandb behavior oldest to newest. we resume from newest
+            id = latest_run.id
+            print(f"Resuming WandB run '{run_cfg.run_name}' with ID: {id}")
+            history = latest_run.history(samples=10000)
+            episodes_to_skip = set(history['episode_label'])
+            print(f"Skipping {len(episodes_to_skip)} episodes already logged in WandB.")
         return RemoteLogger.remote(
             wandb_init_kwargs={
                 "project": run_cfg.wandb_project,
                 "name": run_cfg.run_name,
-                "job_type": "eval" # Hardcode or add to RunConfig schema
+                "job_type": "eval", # Hardcode or add to RunConfig schema,
+                "id": id,
+                "resume": "allow",
             },
             run_config=full_dict_cfg
-        )
+        ),episodes_to_skip
+        
 
 class ExpBootstrapper:
     def __init__(self, cfg: Union[InferenceConfig,RLConfig]):
@@ -383,4 +399,6 @@ def get_shard_iterator(
     if excluded_episodes is not None:
         excluded_episodes = set(excluded_episodes)
         all_episodes = [episode for episode in all_episodes if episode not in excluded_episodes]
+        print(f"After exclusion, {len(all_episodes)} episodes remain for sharding.")
+        
     return chunk_list(all_episodes, shard_size)

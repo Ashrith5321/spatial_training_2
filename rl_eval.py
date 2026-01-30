@@ -52,7 +52,7 @@ def main(cfg: RLConfig):
 
     bootstrapper.setup_cluster()
     trainers = bootstrapper.bootstrap_vlms_rl(training=False) #allocate vlms first to prevent out of room issues
-    wandb_actor = bootstrapper.bootstrap_logger()
+    wandb_actor,episodes_to_skip = bootstrapper.bootstrap_logger()
     sim_logger = wandb_actor
     sims = bootstrapper.bootstrap_sims(sim_logger)
 
@@ -61,7 +61,8 @@ def main(cfg: RLConfig):
         subset_label= cfg.task.subset_label,
         episode_json= cfg.task.episode_json,
         shard_size=cfg.task.shard_size,
-        logger=logger
+        logger=logger,
+        excluded_episodes=episodes_to_skip
     )
 
     shard_iter,shard_iter_copy = itertools.tee(shard_iter)
@@ -77,7 +78,7 @@ def main(cfg: RLConfig):
             ray.kill(sim)
         if wandb_actor is not None:
             ray.get(wandb_actor.close.remote())
-            time.sleep(180)
+            time.sleep(15)
             ray.kill(wandb_actor)
         ray.shutdown()
 
@@ -100,6 +101,7 @@ def main(cfg: RLConfig):
         # bootstrapper.typed_cfg.training.rl_config.n_rollout
         rollout_list,result_list,log_list = collect_rollouts(sims,trainers,shard_iter,batch_size,{"return_inputs":False,"eval":True}) #
         if len(rollout_list) == 0:
+            print("rollout list empty, exiting")
             break
         # save for analysis
         # pickle_obj(rollout_list, f"rollout_{i}")
@@ -107,7 +109,7 @@ def main(cfg: RLConfig):
         # pickle_obj(log_list,f"logpaths_{i}")
     ray.get(log_list)
     import time
-    time.sleep(360)
+    # time.sleep(360)
     cleanup()
 
 if __name__ == "__main__":
