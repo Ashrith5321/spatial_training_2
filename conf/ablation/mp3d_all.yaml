@@ -1,22 +1,30 @@
 # @package _global_
 task:
-  run_name: override_me
+  run_name: mp3d_all
   wandb_project: "rl_eval"
   shard_size: 6
-  subset_label: "sample400_a"
-  episode_json: ''
+  subset_label: ""
+  episode_json: "conf/episode_jsons/mp3d_val.json"
+  output_dir: ./dump/rl_eval
   jobtype: eval
 resources:
+  ray_address: local
+  object_spilling_directory: ./ray_object_spilling
   vlm_resource_tag: env_a
   sim_resource_tag: env_b
-  num_vlms: 3
-  num_sims: 4
+  master_addr: localhost
+  master_port: null
+  num_vlms: 4
+  num_sims: 5
+  vlm_conda_env: vlm_node_1016
+  habitat_conda_env: vln
   vlm_gpu_fraction: 0.7
   sim_gpu_fraction: 0.14
   vlm_cpus: 4
   sim_cpus: 4
+  osm_gb: 400
 rollout:
-  max_steps: 400
+  max_steps: 500
   temperature: 1.0
   action_space_str: '[stop, forward, left, right, up, down]'
   system_prompt: ${read_text:conf/prompts/objectnav_prompt.txt}
@@ -25,8 +33,9 @@ rollout:
   - forward
   - left
   - right
+  stop_prob_threshold: 0.15
 vlm:
-  model_id: Phyllis1/qwen3_sft_rpp_t_rwd_fix_rerun_ckpt89
+  model_id: "Qwen/Qwen3-VL-2B-Instruct"
   attn_impl: flash_attention_2
   dtype: bfloat16
   vocab:
@@ -42,13 +51,13 @@ sim:
   workspace: null
   scenes_dir: null
   split: val
-  fp_guard: true
+  fp_guard: false
   fn_guard: false
   voxel_kwargs: null
   output_schema:
     obs:
       rgb: true
-      goal_name: true
+      instr_or_goal: true
       patch_coords: false
     info:
       episode_label: true
@@ -89,7 +98,7 @@ training:
     use_value: false
     advantage_estimator: reinforce_plus_plus_geometric_time_aware
     policy_loss_name: clip_cov
-    n_rollout: 400
+    n_rollout: 200
     n_adv: 256
     n_epoch: 2
     clip_ratio: 0.2
