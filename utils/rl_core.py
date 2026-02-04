@@ -147,7 +147,8 @@ def collect_rollouts(
     vlm_handles: list,
     shard_iterator: Iterator[list[str]],
     target_episodes: int = float('inf'),
-    postprocess_kwargs = {"return_inputs":True, "eval":False}
+    postprocess_kwargs = {"return_inputs":True, "eval":False},
+    wandb_logger = None
 ) -> tuple[list,list,list]:
     """
     Orchestrates the RL collection pipeline.
@@ -233,7 +234,8 @@ def collect_rollouts(
             current_time = time.time()
             if current_time - last_dispatch_time > 360: # 6 minutes
                 print(f"DEBUG: System frozen for >6m. Active: {len(active_episodes)}, PostProc: {len(pending_postproc)}")
-                
+                if wandb_logger is not None:
+                    ray.get(wandb_logger.alert.remote(title="Rollout Collection Frozen",text=f"Active Episodes: {len(active_episodes)}, Pending PostProc: {len(pending_postproc)}",level="ERROR"))
                 # Check 1: Are we waiting on a specific ref forever?
                 # Dump the first few active refs to inspect
                 import ipdb; ipdb.set_trace() 

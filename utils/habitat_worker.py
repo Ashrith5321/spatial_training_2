@@ -10,6 +10,31 @@ from PIL import Image
 import time
 import numpy as np
 from typing import Optional, Any
+import cv2
+import numpy as np
+
+def motion_blur_kernel(k: int, angle_deg: float = 0.0) -> np.ndarray:
+    if k <= 1:
+        return np.array([[1.0]], dtype=np.float32)
+    kernel = np.zeros((k, k), dtype=np.float32)
+    kernel[k // 2, :] = 1.0
+    if angle_deg != 0.0:
+        center = (k / 2.0 - 0.5, k / 2.0 - 0.5)
+        rot = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+        kernel = cv2.warpAffine(kernel, rot, (k, k))
+    s = kernel.sum()
+    if s > 0:
+        kernel /= s
+    return kernel
+
+def apply_motion_blur(img: np.ndarray, k: int = 15, angle_deg: float = 0.0) -> np.ndarray:
+    import cv2
+
+    if k <= 1:
+        return img
+    kernel = motion_blur_kernel(k, angle_deg)
+    return cv2.filter2D(img, -1, kernel)
+
 @contextmanager
 def suppress_cpp_output():
     """
@@ -680,7 +705,11 @@ class HabitatWorker:
                 step_dict['reward']+=self.explr_bonus
             if action==0 and info['distance_to_goal']>self.config_env.habitat.task.measurements.success.success_distance:
                 if self.fpstop_penalty is not None:
+                    print("FALSE POSITIVE STOP! penalizing.")
                     step_dict['reward']-=self.fpstop_penalty
+                    
+            if action== 1 or action == 2 and np.random.rand()<0.4:
+                obs['rgb'] = apply_motion_blur(obs['rgb'], k=np.random.randint(15,30), angle_deg=0) # horizontal blur simulation
         if self.enable_caching:
             extras["timestamp"] = time.time()
             if supplementary_logs is None:
@@ -984,7 +1013,7 @@ class LoggingHabitatWorker(HabitatWorker):
         logging_output_dir: str,
         logger_actor: Any = None,
         auto_flush = True,
-        minimal_logging = True,
+        minimal_logging = False,
         **kwargs
     ):
         from pathlib import Path
