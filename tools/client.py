@@ -61,7 +61,7 @@ if __name__ == "__main__":
     # --- Step 2: Continuous Control (Images only, State is preserved on server) ---
     print("\n[Step 1-5] Entering control loop (Images only)...")
     
-    for i in range(1, 6):
+    for i in range(1, 500):
         # Simulate robot moving and getting new camera frame
         img_bytes = generate_dummy_image()
         
@@ -73,7 +73,7 @@ if __name__ == "__main__":
         print(f"   [Step {i}] Latency: {latency:.2f} ms | Action ID: {result.get('action_id')}")
         
         # Optional: Sleep to simulate control frequency (e.g., 5Hz)
-        time.sleep(0.2)
+        # time.sleep(0.2)
 
     print("\n--- Demo Complete ---")
 # ssh -p 34929 -L 8000:localhost:8000 root@136.59.129.136 -N[]

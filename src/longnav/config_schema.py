@@ -33,12 +33,6 @@ class VLMConfig:
     use_sparse: bool = True
     save_outputs: bool = False # only need this for RL
 
-    # clip_cov_ratio = config.policy_loss.clip_cov_ratio if config.policy_loss.clip_cov_ratio is not None else 0.0002
-    # cliprange = config.clip_ratio
-    # cliprange_low = config.clip_ratio_low if config.clip_ratio_low is not None else cliprange
-    # cliprange_high = config.clip_ratio_high if config.clip_ratio_high is not None else cliprange
-    # clip_cov_ub = config.policy_loss.clip_cov_ub if config.policy_loss.clip_cov_ub is not None else 5.0
-    # clip_cov_lb = config.policy_loss.clip_cov_lb if config.policy_loss.clip_cov_lb is not None else 1.0
 @dataclass 
 class PolicyLossConfig:
     clip_cov_ratio: Optional[float] = 0.0002

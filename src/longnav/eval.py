@@ -25,10 +25,12 @@ import math
 # if str(_ROOT) not in sys.path:
 #     sys.path.insert(0, str(_ROOT))
 import hydra
-from conf.register_configs import register_configs
-from config_schema import RLConfig
+from longnav.conf.register_configs import register_configs
+from longnav.config_schema import RLConfig
 import os 
 import itertools
+
+from longnav.utils.rollout_core import collect_rollouts
 DEBUG_FLAG = False
 
 # 1. Register our command variants
@@ -39,10 +41,10 @@ def main(cfg: RLConfig):
     import ray
     import numpy as np
 
-    from conf.register_configs import register_configs
-    from utils.factories import ExpBootstrapper,get_shard_iterator,get_console_logger
-    from utils.tensor_utils import TensorPacker
-    from utils.rl_core import collate_trajectories,collect_rollouts
+    from longnav.conf.register_configs import register_configs
+    from longnav.utils.factories import ExpBootstrapper,get_shard_iterator,get_console_logger
+    from longnav.utils.tensor_utils import TensorPacker
+    from longnav.utils.rl_core import collate_trajectories
     from verl.trainer.ppo.core_algos import get_adv_estimator_fn,AdvantageEstimator,POLICY_LOSS_REGISTRY
 
     advantage_estimator_fn = get_adv_estimator_fn(cfg.training.rl_config.advantage_estimator)

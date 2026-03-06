@@ -1,6 +1,5 @@
 import torch 
 from transformers import Cache, Qwen3VLForConditionalGeneration, Qwen3VLTextModel,Qwen3VLModel, Qwen3VLVisionModel
-from transformers.utils.generic import check_model_inputs
 from typing import Any, Callable, Optional, TypedDict, Union
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 import torch.nn as nn
@@ -179,7 +178,7 @@ def filter_embeds(
 
     return embeds_to_keep_idx, image_embeds_flat[embeds_to_keep_idx].detach()
 
-class Qwen3VLSparseTextModel(Qwen3VLTextModel):
+class TextMixin:
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -321,6 +320,9 @@ class Qwen3VLSparseTextModel(Qwen3VLTextModel):
             self.deepstack_visual_embeds = [v.cpu() for v in deepstack_visual_embeds] if deepstack_visual_embeds is not None else None
             self.visual_pos_masks = visual_pos_masks.cpu() if visual_pos_masks is not None else None
         return outputs
+    
+class Qwen3VLSparseTextModel(TextMixin,Qwen3VLTextModel):
+    pass
 
 # --- 2. The Middle Man (The Composite Model) ---
 class Qwen3VLSparseModel(Qwen3VLModel):

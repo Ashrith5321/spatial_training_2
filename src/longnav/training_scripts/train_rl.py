@@ -1,18 +1,18 @@
 '''
 🚀 [run experiment]:
-python3 training_scripts/train_rl.py +experiment=<experiment_name> +node=<goldeen/lighthouse>
-NOTE: experiment_name must be a config that exists in conf/experiment.
+python3 -m longnav.training_scripts.train_rl.py +experiment=<experiment_name>
+NOTE: experiment_name must be a config that exists in src/conf/experiment.
 
 ⚙️ [add experiment config]:
-add new yaml to conf/experiment. see config_schema.py for requirements or reference existing yaml.
+add new yaml to src/conf/experiment. see config_schema.py for requirements or reference existing yaml.
 NOTE: need to have "# @package _global_" at the start of your config.
 
 👾 [see hydra help]:
-python3 training_scripts/train_rl.py --help
+python3 -m longnav.training_scripts.train_rl.py --help
 https://hydra.cc/docs/intro/
 
 🔧 [install tab completion]:
-eval "$(python training_scripts/train_rl.py -sc install=bash)"
+eval "$(python3 -m longnav.training_scripts.train_rl.py -sc install=bash)"
 NOTE: tab completion only works if your command uses python not python3. somehow.
 '''
 import os
@@ -30,8 +30,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 import hydra
-from conf.register_configs import register_configs
-from config_schema import RLConfig
+from longnav.conf.register_configs import register_configs
+from longnav.config_schema import RLConfig
 import os 
 
 DEBUG_FLAG = False
@@ -45,12 +45,12 @@ def main(cfg: RLConfig):
     import ray
     import numpy as np
 
-    from conf.register_configs import register_configs
-    from utils.factories import ExpBootstrapper,get_shard_iterator,get_console_logger
-    from utils.tensor_utils import TensorPacker
-    from utils.rl_core import collate_trajectories,collect_rollouts
-    from verl.trainer.ppo.core_algos import get_adv_estimator_fn,AdvantageEstimator,POLICY_LOSS_REGISTRY
-    import signal
+    from longnav.conf.register_configs import register_configs
+    from longnav.utils.factories import ExpBootstrapper,get_shard_iterator,get_console_logger
+    from longnav.utils.tensor_utils import TensorPacker
+    from longnav.utils.rl_core import collate_trajectories
+    from longnav.utils.rollout_core import collect_rollouts
+    from verl.trainer.ppo.core_algos import get_adv_estimator_fn
     import json
 
     def debug_signal_handler(sig, frame):
@@ -293,10 +293,7 @@ def main(cfg: RLConfig):
                 ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{global_cycle}")))
             else:
                 print(f"T-{steps_until_save} steps until checkpoint!")
-            print("saving debug...")
-            pickle_obj(traj_batch, f"tb_{global_cycle}")
-            pickle_obj(result_list, f"result_{global_cycle}")
-            pickle_obj(ray.get(log_list),f"logpaths_{global_cycle}")
+
             del model_inputs
     finally:
 

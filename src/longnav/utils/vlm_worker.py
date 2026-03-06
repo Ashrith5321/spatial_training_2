@@ -12,6 +12,7 @@ from torch.optim import AdamW
 from dataclasses import dataclass,field
 # from transformers.models.qwen3_vl.modeling_qwen3_vl import rotate_half
 import torch.nn.functional as F
+from longnav.config_schema import VLMTrainingConfig
 
 def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> torch.Tensor:
     """
@@ -91,7 +92,7 @@ class VLMWorker:
             self.device = self.model.device
         else:
             from transformers import AutoConfig
-            from utils.modeling import Qwen3VLSparseForConditionalGeneration
+            from longnav.utils.modeling import Qwen3VLSparseForConditionalGeneration
             config = AutoConfig.from_pretrained(self.model_id, trust_remote_code=True)
             print(f"Loading {self.model_id} with sparsifying patch...")
             self.model = Qwen3VLSparseForConditionalGeneration.from_pretrained(
@@ -223,16 +224,18 @@ class VLMWorker:
             input_ids = self.cumulative_inputs['input_ids']
             image_grid_thw = self.cumulative_inputs['image_grid_thw']
             attention_mask = self.cumulative_inputs['attention_mask']
+            # mm_token_type_ids = self.cumulative_inputs['mm_token_type_ids'] # not sure if needed but just in case
             # 1. Ask Qwen to calculate the 3D layout for this chunk
             # This returns positions starting at T=0, H=0, W=0 relative to this chunk
             position_ids, deltas = self.vl_model.get_rope_index(
                 input_ids=input_ids,
                 image_grid_thw=image_grid_thw, 
                 video_grid_thw=None,
-                attention_mask=attention_mask
+                attention_mask=attention_mask,
+                # mm_token_type_ids=mm_token_type_ids
             )
         elif pos_id_kwargs['mode'] == 'bev':
-            from utils.bev_utils import get_pos_id
+            from longnav.utils.bev_utils import get_pos_id
             self._accumulate_custom_inputs({'patch_coords':torch.tensor(pos_id_kwargs['patch_coords']).unsqueeze(0)},dim=0) 
             patch_coords = self.cumulative_inputs['patch_coords'] # N_image by H by W by 3
             patch_coords = patch_coords-torch.amin(patch_coords[:1],dim=[1,2],keepdim=True) 
@@ -255,7 +258,8 @@ class VLMWorker:
             input_ids=input_ids,
             image_grid_thw=image_grid_thw, 
             video_grid_thw=None,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            mm_token_type_ids=turn_inputs.get('mm_token_type_ids',None)
         )
         position_ids += self.offset
         self.offset += len(turn_inputs['input_ids'][0])
@@ -294,6 +298,7 @@ class VLMWorker:
         
         RESETS internal outputs after packing.
         '''
+        assert(self.save_outputs) # must be saving outputs to use this function.
         deepstack =[torch.cat([self.outputs['deepstack_visual_embeds'][i][j] for j in range(len(self.outputs['deepstack_visual_embeds'][i]))],dim=0) for i in range(len(self.outputs['deepstack_visual_embeds']))]
         position_ids = torch.cat(self.outputs['position_ids'],dim=-1)
         visual_pos_masks = torch.cat(self.outputs['visual_pos_masks'],dim=1)
@@ -357,10 +362,12 @@ class VLMWorker:
             if len(prefix_starts)>1:
                 turn_inputs['attention_mask'] = turn_inputs['attention_mask'][:,(postfix_starts[0]-1):(postfix_starts[-1]-1)]
                 turn_inputs["input_ids"] = turn_inputs['input_ids'][:,(postfix_starts[0]-1):(postfix_starts[-1]-1)]
+                turn_inputs["mm_token_type_ids"] = turn_inputs['mm_token_type_ids'][:,(postfix_starts[0]-1):(postfix_starts[-1]-1)] if 'mm_token_type_ids' in turn_inputs else None
             else:
                 turn_inputs['attention_mask'] = turn_inputs['attention_mask'][:,:(postfix_starts[-1]-1)]
                 turn_inputs["input_ids"] = turn_inputs['input_ids'][:,:(postfix_starts[-1]-1)]
-        
+                turn_inputs["mm_token_type_ids"] = turn_inputs['mm_token_type_ids'][:,:(postfix_starts[-1]-1)] if 'mm_token_type_ids' in turn_inputs else None
+
         t = time.time()
         self._accumulate_inputs(turn_inputs)
         # print(f"accumulate time: {time.time()-t}",end=" ")
@@ -523,7 +530,7 @@ class VLMWrapper(nn.Module):
         logits_to_keep = embeds_inputs.pop('logits_to_keep')
         embeds_inputs.pop('input_ids_reference')
         embeds_inputs['seq_keep_mask']='everything' # force keeping everything since seq is already sparse
-        hidden = self.vlm.language_model(**embeds_inputs).last_hidden_state
+        hidden = self.vlm.model.model.language_model(**embeds_inputs).last_hidden_state #TODO: fix this mess
         values = None
         if compute_values:
             value_hidden = hidden[:,logits_to_keep].to(self.vlm.value_head.dtype)
@@ -603,7 +610,6 @@ class VLMWrapper(nn.Module):
             print("[VLMWrapper] Info: Could not auto-detect Vision Tower module to safeguard. Assuming it is correctly frozen.")
 
 class VLMTrainingMixin:
-    from config_schema import VLMTrainingConfig
 
     def setup_training(self, config: VLMTrainingConfig, rank: int,
     world_size: int,
@@ -643,7 +649,7 @@ class VLMTrainingMixin:
                 self.model.enable_input_require_grads() # use_reentrant=False to prevent hangs
             else:
                 raise NotImplementedError("Model does not support 'enable_input_require_grads' method.")
-        hidden_size = self.model.language_model.config.hidden_size
+        hidden_size = self.language_model.config.hidden_size
         
         if config.rl_config is not None:
             if config.rl_config.use_value:
@@ -751,9 +757,8 @@ class VLMTrainingMixin:
             self.optimizer.zero_grad()
         return loss.item()
 
-    def _forward_embeds(self,rl_embeds_inputs,model=None,compute_values=False):
-        if model is None:
-            model = self.model
+    def _forward_embeds(self,rl_embeds_inputs,compute_values=False):
+        model = self.model
         embeds_inputs = {k:v.to('cuda') for k,v in rl_embeds_inputs.items()}
         embeds_inputs['inputs_embeds'] = embeds_inputs['inputs_embeds'].to(self.model.dtype)
         if model.training:
@@ -762,7 +767,7 @@ class VLMTrainingMixin:
         logits_to_keep = embeds_inputs.pop('logits_to_keep')
         embeds_inputs.pop('input_ids_reference')
         embeds_inputs['seq_keep_mask']='everything' # force keeping everything since seq is already sparse
-        hidden = model.language_model(**embeds_inputs,).last_hidden_state
+        hidden = self.language_model(**embeds_inputs,).last_hidden_state
         values = None
         if compute_values:
             values = model.value_head(hidden[:,logits_to_keep].to(model.value_head.dtype)).squeeze(-1)
@@ -1061,7 +1066,7 @@ class VLMTrainingMixin:
         """
         import os
         from peft.utils import set_peft_model_state_dict, load_peft_weights
-        from utils.factories import get_base_model
+        from longnav.utils.factories import get_base_model
         # 1. Base Model Check
         
         if strict_base_check:

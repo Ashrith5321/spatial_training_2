@@ -5,10 +5,13 @@ import io
 import uvicorn
 from typing import Optional
 from dataclasses import asdict
-from utils.inference_core import RLWorker
-from config_schema import RolloutConfig,VLMConfig,VLMTrainingConfig
-from utils.factories import resolve_checkpoint_path,get_base_model
-from utils.inference_core import substitute_convo_template
+from longnav.utils.rollout_core import RLWorker
+from longnav.config_schema import RolloutConfig,VLMConfig,VLMTrainingConfig
+from longnav.utils.factories import resolve_checkpoint_path,get_base_model
+from longnav.utils.rollout_core import substitute_convo_template
+import os
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent
 import numpy as np
 rollout_cfg = RolloutConfig()
 vlm_cfg = VLMConfig()
@@ -20,7 +23,7 @@ checkpoint_path = resolve_checkpoint_path(checkpoint_path)
 base_model_path = get_base_model(checkpoint_path)
 vlm_cfg.model_id = base_model_path
 
-system_prompt_path = "conf/prompts/objectnav_prompt.txt"
+system_prompt_path = PROJECT_ROOT.joinpath(Path("conf/prompts/objectnav_prompt.txt"))
 with open(system_prompt_path,'r') as f:
     system_prompt = f.read()
 rollout_cfg.convo_start_template=[
@@ -50,9 +53,6 @@ def infer_step(worker,rgb_pil,instr_or_goal=None):
             action_id = np.random.choice(len(action_probs)-1,p=action_probs[1:]/np.sum(action_probs[1:]))+1
     worker.messages = substitute_convo_template(worker.rollout_config['convo_turn_template'],{"action":worker.rollout_config['action_space'][action_id]})
     return action_id,action_probs
-
-# ... [INSERT YOUR EXISTING IMPORTS AND SETUP CODE HERE] ...
-# Ensure 'worker' is initialized here as per your script.
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

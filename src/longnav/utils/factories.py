@@ -1,10 +1,9 @@
 import ray
 import os
 from omegaconf import OmegaConf
-from config_schema import *
+from longnav.config_schema import *
 
 # Use these imports for type hinting
-from config_schema import VLMConfig, RolloutConfig, ResourceConfig, HabitatConfig, RunConfig
 from typing import List, Dict, Any, Iterator, Optional,Union
 import logging
 import json
@@ -101,7 +100,7 @@ class InferenceWorkerFactory:
     @staticmethod
     def create(vlm_dict: dict, rollout_dict: dict, res_cfg: ResourceConfig):
         # res_cfg is fine to keep as object for resource logic
-        from utils.inference_core import InferenceRayWorker
+        from longnav.utils.rollout_core import InferenceRayWorker
         
         # We use the dicts directly to avoid pickling issues
         RemoteInferenceWorker = ray.remote(InferenceRayWorker).options(
@@ -124,12 +123,12 @@ class RLWorkerFactory:
     @staticmethod
     def create(vlm_dict: dict, rollout_dict: dict, res_cfg: ResourceConfig):
         # res_cfg is fine to keep as object for resource logic
-        from utils.inference_core import RLRayWorker
+        from longnav.utils.rollout_core import RLActor
         env_dict = {}
         if res_cfg.vlm_conda_env is not None:
             env_dict = {"conda": res_cfg.vlm_conda_env}
         # We use the dicts directly to avoid pickling issues
-        RemoteRLWorker = ray.remote(RLRayWorker).options(
+        RemoteRLWorker = ray.remote(RLActor).options(
             resources={res_cfg.vlm_resource_tag: 1},
             num_cpus=res_cfg.vlm_cpus,
             num_gpus=res_cfg.vlm_gpu_fraction,
@@ -178,11 +177,11 @@ class RLWorkerFactory:
 class SimWorkerFactory:
     @staticmethod
     def create(sim_dict: dict, res_cfg: ResourceConfig, task_cfg: RunConfig, logger_actor=None,config_overrides=None):
-        from utils.inference_core import HabitatRayWorker
+        from longnav.env.habitat import HabitatEnvActor
         env_dict = {}
         if res_cfg.habitat_conda_env is not None:
             env_dict = {"conda": res_cfg.habitat_conda_env}
-        RemoteSim = ray.remote(HabitatRayWorker).options(
+        RemoteSim = ray.remote(HabitatEnvActor).options(
             resources={res_cfg.sim_resource_tag: 1},
             num_cpus=res_cfg.sim_cpus,
             num_gpus=res_cfg.sim_gpu_fraction,
@@ -215,7 +214,7 @@ class WandbFactory:
         if not run_cfg.wandb_project: 
             return None
         
-        from utils.logging_workers import WandbLoggerActor
+        from longnav.utils.logging_workers import WandbLoggerActor
         
         RemoteLogger = ray.remote(WandbLoggerActor).options(
             num_cpus=0, 
@@ -251,7 +250,15 @@ class ExpBootstrapper:
     def __init__(self, cfg: Union[InferenceConfig,RLConfig]):
         # Resolve all interpolations (Stage 1)
         # This turns ${read_text:...} into actual file content
-        self.resolved_dict = OmegaConf.to_container(cfg, resolve=True)
+        try:
+            self.resolved_dict = OmegaConf.to_container(cfg, resolve=True)
+        except:
+            try:
+                from dataclasses import asdict
+                self.resolved_dict = asdict(cfg)
+            except Exception as e:
+                print(f"⚠️ Failed to convert config to dict: {e}")
+                self.resolved_dict = {}
         self.typed_cfg = cfg 
 
     def setup_cluster(self):
@@ -371,7 +378,7 @@ def get_shard_iterator(
     """
     # Case A: Trivial Shard (Let Habitat handle loading via its own config)
     if shard_size <= 0:
-        logger.info("Using trivial shard (full dataset via Habitat config).")
+        if logger is not None: logger.info("Using trivial shard (full dataset via Habitat config).")
         return trivial_shard_iterator()
 
     # Case B: Explicit Sharding (We must load the list first)
@@ -379,17 +386,17 @@ def get_shard_iterator(
 
     if subset_label:
         # Import inside function to avoid circular dependencies or heavy startup
-        from constants import episode_labels_table
+        from longnav.constants import episode_labels_table
         if subset_label in episode_labels_table:
             all_episodes = episode_labels_table[subset_label]
-            logger.info(f"Loaded {len(all_episodes)} episodes from subset: {subset_label}")
+            if logger is not None: logger.info(f"Loaded {len(all_episodes)} episodes from subset: {subset_label}")
         else:
             raise ValueError(f"Subset label '{subset_label}' not found in constants.")
 
     elif episode_json:
         with open(episode_json, 'r') as f:
             all_episodes = json.load(f)
-        logger.info(f"Loaded {len(all_episodes)} episodes from JSON: {episode_json}")
+        if logger is not None: logger.info(f"Loaded {len(all_episodes)} episodes from JSON: {episode_json}")
 
     else:
         raise ValueError("Shard size > 0 but no episode source (subset_label or episode_json) provided.")
@@ -399,6 +406,6 @@ def get_shard_iterator(
     if excluded_episodes is not None:
         excluded_episodes = set(excluded_episodes)
         all_episodes = [episode for episode in all_episodes if episode not in excluded_episodes]
-        print(f"After exclusion, {len(all_episodes)} episodes remain for sharding.")
+        if logger is not None: logger.info(f"After exclusion, {len(all_episodes)} episodes remain for sharding.")
         
     return chunk_list(all_episodes, shard_size)

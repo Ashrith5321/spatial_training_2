@@ -1,0 +1,40 @@
+[project]
+name = "longnav"
+version = "0.1"
+authors = [
+  { name="Avery Xi", email="axi@umich.edu" },
+  { name="Qixin Xiao", email="qxiaocs@umich.edu" },
+
+]
+description = ""
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+    "datasets",
+    "transformers",
+    "ray[default]",
+    "hydra-core",
+    "fastapi[standard]",
+    "pillow",
+    "opencv-python",
+    "torchvision",
+    "torch",
+    "peft",
+    "wandb",
+    "tensordict",
+    "huggingface-hub",
+    "codetiming"
+]
+[project.urls]
+#Homepage = ""
+#Issues = ""
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

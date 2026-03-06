@@ -1,31 +1,13 @@
 import ray
 from collections import deque
-from typing import List, Dict, Any, Iterator,Tuple
+from typing import List, Dict, Any, Iterator
 from string import Template
 from PIL import Image
-from utils.habitat_worker import LoggingHabitatWorker
-from utils.vlm_worker import VLMWorker,VLMTrainingMixin
+from longnav.utils.vlm_worker import VLMWorker,VLMTrainingMixin
 import numpy as np
-from tqdm import tqdm
-from utils.tensor_utils import TensorPacker
+from longnav.utils.tensor_utils import TensorPacker
+import time 
 
-def create_shard_iterator(
-    all_episodes: List[str], 
-    shard_size: int
-) -> Iterator[List[str]]:
-    """
-    Yields chunks of episodes.
-    """
-    # Simple list slicing generator
-    for i in range(0, len(all_episodes), shard_size):
-        yield all_episodes[i : i + shard_size]
-
-def trivial_shard_iterator():
-    '''
-    yields the trivial shard (None) once.
-    '''
-    yield None
-    
 def substitute_convo_template(conversation_template: List[Dict], substitutions: Dict[str, Any]) -> List[Dict]:
     """
     Traverses the conversation template and substitutes any string.Template 
@@ -96,7 +78,13 @@ class EpisodeRolloutMixin:
              stacked["rewards"] = stacked["rewards"].astype(np.float32)    
         return stacked
     
-    def run_episode(self,habitat_handle, initial_state_ref,collect_trajectory=False,compute_value=False):
+    def run_episode(self,env_handle, initial_state_ref,collect_trajectory=False,compute_value=False):
+        """
+        Returns:
+        - is_exhausted: Whether the sim ran out of episodes
+        - final_info: The final info dict from the sim (contains success, spl, etc.)
+        - trajectory: If collect_trajectory is True, returns the collected trajectory in columnar format (dict of numpy arrays).
+        """
         import time
         self.reset() #we reset at the start to ensure clean state. not resetting at the end preserves state for downstream.
         try:
@@ -122,7 +110,7 @@ class EpisodeRolloutMixin:
             # Trajectory Buffer (List is fine here!)
             trajectory_buffer = []
             instr_or_goal = state_dict['obs']['instr_or_goal']
-            episode_label = state_dict['info']['episode_label']
+            # episode_label = state_dict['info']['episode_label']
             while not done and step_count < self.rollout_config['max_steps']:
                 # A. Prepare VLM Input
                 rgb_numpy = rgb
@@ -151,8 +139,6 @@ class EpisodeRolloutMixin:
                         vlm_logs['sum/spguard_trigger_count']=1
                         action_id = np.random.choice(len(action_probs)-1,p=action_probs[1:]/np.sum(action_probs[1:]))+1
                     
-                oracle_action_id = state_dict['info'].get('oracle_action',-1) # only update temporally afterwards
-
                 entropy = -np.sum(action_probs * np.log(action_probs + 1e-9))
                 vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':float(action_probs[action_id]),"action_probs":action_probs.tolist()} 
                 # D. Store Transition
@@ -161,7 +147,7 @@ class EpisodeRolloutMixin:
                 # D. Step Simulator (Blocking) ---------------------------RAY----------------------------- 
                 t0 = time.time()
                 # del rgb,state_dict
-                state_ref = ray.get(habitat_handle.step.remote(action_id,supplementary_logs=vlm_logs))
+                state_ref = ray.get(env_handle.step.remote(action_id,supplementary_logs=vlm_logs))
                 if len(state_ref)==2:
                     rgb,state_dict = state_ref
                 elif len(state_ref)==3:
@@ -177,10 +163,10 @@ class EpisodeRolloutMixin:
                         "rollout_probs": action_probs,
                         "rewards": state_dict.get("reward", 0.0),
                         "dones": state_dict['done'],
-                        "spl": state_dict['info']['spl'],
-                        "success": state_dict['info']['success'],
-                        "distance_to_goal": state_dict['info']['distance_to_goal'],
-                        "oracle_actions": oracle_action_id
+                        # "spl": state_dict['info']['spl'],
+                        # "success": state_dict['info']['success'],
+                        # "distance_to_goal": state_dict['info']['distance_to_goal'],
+                        **state_dict['info'],
                     }
                     if compute_value:
                         import torch
@@ -196,14 +182,14 @@ class EpisodeRolloutMixin:
             final_trajectory = self._pack_trajectory(trajectory_buffer) if collect_trajectory else None
             final_info = state_dict['info'] | {"steps":step_count, "instr_or_goal":instr_or_goal}
             # Return Clean Tuple (No Actor Handles here)
-            return habitat_handle, state_dict['is_exhausted'], final_info, final_trajectory
+            return state_dict['is_exhausted'], final_info, final_trajectory
         
         except Exception as e:
             print(f"Episode failed: {e}")
             import traceback
             traceback.print_exc()
             # Return handles anyway so we don't leak resources (or handle crash logic)
-            return habitat_handle,False, None,None
+            return False, None,None
 
 class RolloutWorker(VLMWorker, EpisodeRolloutMixin):
     def __init__(self, rollout_config: Dict[str, Any], **vlm_kwargs):
@@ -224,11 +210,6 @@ class RolloutWorker(VLMWorker, EpisodeRolloutMixin):
         # effectively bypassing the need for cooperative inheritance in the parents.
         self.rollout_config = rollout_config
 
-class InferenceRayWorker(RolloutWorker):
-    def run_episode(self,habitat_handle, initial_state_ref):
-        habitat_handle,is_exhausted,final_info,_ = super().run_episode(habitat_handle, initial_state_ref)
-        return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,final_info
-
 class RLWorker(RolloutWorker,VLMTrainingMixin):
     def __init__(self, rollout_config: Dict[str, Any], **vlm_kwargs):
         """
@@ -240,9 +221,14 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
         # 2. Initialize Rollout Config
         self.rollout_config = rollout_config
         
-    def run_episode(self,habitat_handle,initial_state_ref,rtn_inputs = False,rtn_embeds=True):
+    def run_episode(self,env_handle,initial_state_ref,rtn_inputs = False):
         '''
-        stateful run episode. stores the trajectory and sequence level model inputs internally so we can release the habitat ref, and later calculate the logprobs.
+        Returns:
+        - is_exhausted: Whether the sim ran out of episodes
+        - final_info: The final info dict from the sim (contains success, spl, etc.)
+        - trajectory: If collect_trajectory is True, returns the collected trajectory in columnar format (dict of numpy arrays).    
+        - inputs: optional, full input for model forward pass.
+        
         '''
         self.rl_seq_inputs = None
         self.rl_embeds_inputs = None
@@ -251,16 +237,14 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
             self.save_pixels = True #need pixels to reconstruct sequence inputs.
         else:
             self.save_pixels = False
-        habitat_handle,is_exhausted,state_dict,trajectory = super().run_episode(habitat_handle, initial_state_ref,collect_trajectory=True,compute_value=False)
+        is_exhausted,result,trajectory = super().run_episode(env_handle, initial_state_ref,collect_trajectory=True,compute_value=False)
         self.rl_trajectory = trajectory
         inputs,embeds = None,None
-        if rtn_embeds:
-            embeds = self._pack_embeds()
-            self.rl_embeds_inputs = embeds
+
         if rtn_inputs:
             inputs = self._pack_inputs()
             self.rl_seq_inputs = inputs
-        return habitat_handle,is_exhausted,state_dict,trajectory,inputs,embeds
+        return is_exhausted,result,trajectory,inputs
 
     def postprocess_episode(self,eval=False):
         '''
@@ -273,14 +257,16 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
         model_inputs = None
 
         if not eval: # skip logprobs calculation during eval for speed.
+            embeds = self._pack_embeds()
+            self.rl_embeds_inputs = embeds
             values = None
             import torch
             with torch.no_grad():
                 if self.rl_embeds_inputs is not None:
-                    logits,values = self._forward_embeds(self.rl_embeds_inputs,None,self.rl_algo_config.use_value)
+                    logits,values = self._forward_embeds(self.rl_embeds_inputs,self.rl_algo_config.use_value)
                     model_inputs = self.rl_embeds_inputs
                 elif self.rl_seq_inputs is not None:
-                    logits,values = self._forward_seq(self.rl_seq_inputs,None,self.rl_algo_config.use_value)
+                    logits,values = self._forward_seq(self.rl_seq_inputs,self.rl_algo_config.use_value)
                     model_inputs = self.rl_seq_inputs
                 else:
                     raise ValueError("No stored model inputs found for postprocessing.")
@@ -294,25 +280,25 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
                     self.unmerge_adapter()
                     with self.model.disable_adapter():
                         if self.rl_embeds_inputs is not None:
-                            logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
+                            logits,values = self._forward_embeds(self.rl_embeds_inputs,False)
                         elif self.rl_seq_inputs is not None:
-                            logits,values = self._forward_seq(self.rl_seq_inputs,None,False)
+                            logits,values = self._forward_seq(self.rl_seq_inputs)
                         ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
                         self.rl_trajectory['ref_logprobs'] = ref_logprobs
 
         return self.rl_trajectory,model_inputs    
     
-class RLRayWorker(RLWorker):
-    def run_episode(self,habitat_handle,initial_state_ref):
-        habitat_handle,is_exhausted,state_dict,_,_,_ = super().run_episode(habitat_handle, initial_state_ref)
-        return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
+class RLActor(RLWorker):
+    def run_episode(self,env_handle,initial_state_ref):
+        is_exhausted,state_dict,_,_ = super().run_episode(env_handle, initial_state_ref)
+        return is_exhausted,state_dict
     
     def postprocess_episode(self,return_inputs = True,eval=False):
         trajectory,model_inputs = super().postprocess_episode(eval=eval)
         if return_inputs:
             inputs_tensors,inputs_metadata = TensorPacker.pack(model_inputs)
             return trajectory,inputs_tensors,inputs_metadata
-        else: return trajectory,
+        else: return trajectory,None,None
 
     def train_rl_step(self, embeds_inputs_np, embeds_inputs_meta,traj_batch):
         embeds_inputs = TensorPacker.unpack(embeds_inputs_np,embeds_inputs_meta,device=self.accelerator.device)
@@ -417,177 +403,161 @@ class RLRayWorker(RLWorker):
             loss_weights=[rl_weight, bc_weight]
         )
         
-class HabitatRayWorker(LoggingHabitatWorker):
+def collect_rollouts(
+    env_handles: list,
+    vlm_handles: list,
+    shard_iterator: Iterator[list[str]],
+    target_episodes: int = float('inf'),
+    postprocess_kwargs = {"return_inputs":True, "eval":False},
+    wandb_logger = None
+) -> tuple[list,list,list]:
     """
-    Ray Actor wrapper for the LoggingHabitatWorker.
-    
-    Optimizations:
-    1. Interface Shaping: Separates heavy RGB arrays from lightweight scalar state.
-    2. RPC Reduction: Injects 'is_exhausted' into the state dictionary.
-    """
+    Orchestrates the RL collection pipeline.
 
-    def reset(self) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """
-        Returns:
-            rgb: The heavy image array.
-            state_dict: {'obs': ..., 'is_exhausted': ...}
-        """
-        # Base worker returns a single dict (typically just the observations for reset)
-        state_dict = super().reset()
-        
-        # 1. Extract the heavy asset (modifies dict in place)
-        rgb = state_dict['obs'].pop("rgb")
-
-        state_dict['is_exhausted'] = self.is_exhausted()
-        
-        if self.voxel_kwargs is None:
-            return rgb, state_dict
-        else:
-            patch_coords = state_dict['obs'].pop('patch_coords')
-            return rgb,patch_coords,state_dict
-
-
-    def step(self, action: int, supplementary_logs: Dict[str, Any] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """
-        Returns:
-            rgb: The heavy image array.
-            state_dict: {'obs': ..., 'reward': ..., 'done': ..., 'info': ..., 'is_exhausted': ...}
-        """
-        # Base worker returns a single dict containing keys: 'obs', 'reward', 'done', 'info'
-        result = super().step(action, supplementary_logs=supplementary_logs)
-        # 1. Extract the heavy asset from the nested observation dict
-        # We modify the dictionary in-place to avoid copying data
-        rgb = result['obs'].pop("rgb")
-        # 2. Inject the exhaustion flag
-        result['is_exhausted'] = self.is_exhausted()
-        # 'result' now acts as our 'state_dict' (sans the heavy RGB)
-        if self.voxel_kwargs is None:
-            return rgb, result
-        else:
-            patch_coords = result['obs'].pop('patch_coords')
-            return rgb,patch_coords,result
-
-
-def run_inference_driver(
-    sim_handles: List[Any],
-    vlm_handles: List[Any],
-    shard_iterator: Iterator[List[str]]
-) -> List[Dict]:
-    """
-    Orchestrates the evaluation pipeline.
-
-    Args:
-        sim_handles: List of Ray actor handles for Habitat workers.
-        vlm_handles: List of Ray actor handles for VLM workers.
-        config: Configuration dict passed to the supervisor.
-        shard_iterator: An iterator yielding lists of episode IDs (shards).
+    returns: trajectory buffer, result list, log list, indexed by dispatch_id
     """
 
     # --- 1. Initialize Pools ---
-    # Idle VLMs: Ready to be assigned immediately
     idle_vlms = deque(vlm_handles)
-    
-    # Ready Habitats: Tuple of (actor_handle, initial_state_ref)
-    # These are workers that have finished resetting and are waiting for a VLM.
-    ready_habitats = deque()
-    # --- 2. Tracking Futures (The State Machine) ---
-    # Map: reset_future -> habitat_handle
-    # Tracks workers currently resetting (loading scene or moving to next episode).
-    pending_resets = {} 
-    # Map: supervisor_future -> "metadata"
-    # Tracks active episodes running in the background.
-    active_episodes = {}
-    # Collection of all results
-    results = []
-    # --- 3. Bootstrap: Initial Sharding & Resets ---
-    print(f"Bootstrapping: Initializing {len(sim_handles)} environments...")
-    
-    # We must assign an initial shard to every habitat worker before they can reset.
-    for sim_handle in sim_handles:
-        try:
-            # Assign first shard
-            initial_shard = next(shard_iterator)
-            sim_handle.assign_shard.remote(initial_shard)
-            
-            # Trigger first reset
-            # The worker will load the first episode in the shard.
-            reset_ref = sim_handle.reset.remote()
-            pending_resets[reset_ref] = sim_handle   
-        except StopIteration:
-            print("Warning: Not enough shards for all workers during bootstrap.")
-            # Worker is retired immediately if no work exists
-            pass
-    # --- 4. The Event Loop ---
-    # We run as long as there is active work (resets or episodes) or potential work.
-    
-    while active_episodes or pending_resets or (ready_habitats and idle_vlms):
-        
-        # A. Check for "Ready to Pair" Condition
-        # If we have an idle VLM and a ready Habitat, launch a task immediately.
-        while idle_vlms and ready_habitats:
-            vlm = idle_vlms.popleft()
-            hab, init_state_ref = ready_habitats.popleft()
-            
-            # LAUNCH SUPERVISOR
-            # The supervisor coordinates the interaction between VLM and Habitat for ONE episode.
-            print("dispatching new episode!")
-            sup_ref = vlm.run_episode.remote(
-                hab, init_state_ref
-            )
-            
-            active_episodes[sup_ref] = "running"
+    ready_sims = deque()
 
-        # B. Wait for SOMETHING to happen
-        # We listen to both pool (resets) and active tasks (episodes).
-        all_watch_refs = list(pending_resets.keys()) + list(active_episodes.keys())
-        
+    # --- 2. Tracking Futures ---
+    pending_resets = {}   # reset_ref -> sim_handle
+    active_episodes = {}  # ep_ref -> dispatch_id
+
+    # VLM post-processing
+    pending_postproc = {} # pp_ref -> vlm_handle, dispatch_id 
+    # Sim logging
+    pending_logs = {} # log_ref -> sim_handle, dispatch_id
+
+    trajectory_buffer = []
+    trajectory_ids = []
+
+    result_dict = {}
+    log_dict = {}
+    iterator_exhausted = False
+
+    last_dispatch_time = time.time()
+    # --- 3. Bootstrap: Initial Sharding & Resets ---
+    for env_handle in env_handles:
+        try:
+            if ray.get(env_handle.is_exhausted.remote()):
+                initial_shard = next(shard_iterator)
+                env_handle.assign_shard.remote(initial_shard)
+            reset_ref = env_handle.reset.remote()
+            pending_resets[reset_ref] = env_handle
+        except StopIteration:
+            iterator_exhausted = True
+            print("Warning: Not enough shards for all workers during bootstrap.")
+            pass
+    print(f"Bootstrapping: Initializing {len(env_handles)} environments...")
+    initial_live_sims = len(pending_resets)
+    # Helper to check if we should keep the loop alive
+    def has_work():
+
+        # 1. Are tasks currently running?
+        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0#or len(pending_logs) > 0
+        # 2. Do we still want to launch new tasks (now or in the future)? (Resources available AND Target not met)
+        potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
+        want_launch = (potential < target_episodes) and initial_live_sims > 0
+        return is_active or want_launch
+
+    dispatch_counter = 0
+    # --- Event Loop ---
+    while has_work():
+        # A. Dispatch (IDENTICAL)
+        total_potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
+
+        while (idle_vlms and ready_sims and total_potential < target_episodes):
+            vlm = idle_vlms.popleft()
+            sim, init_state_ref = ready_sims.popleft()
+            ep_ref = vlm.run_episode.remote(sim, init_state_ref)
+            active_episodes[ep_ref] = dispatch_counter,vlm,sim
+            dispatch_counter +=1
+            total_potential +=1
+
+
+        # B. Wait for Events
+        all_watch_refs = list(pending_resets.keys()) + \
+                         list(active_episodes.keys()) + \
+                         list(pending_postproc.keys()) + \
+                         list(pending_logs.keys())
+
         if not all_watch_refs:
-            # Only happens if iterator exhausted and all workers are idle (shutdown)
             break
 
-        # Blocking wait for the FIRST completed future to maximize responsiveness
-        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1)
-        
+        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1,timeout=15.0)
+        if not ready_refs:
+            # If we get here, the orchestrator is "stuck" waiting.
+            # We can use this moment to diagnose.
+
+            # Simple deadlock detector:
+            current_time = time.time()
+            if current_time - last_dispatch_time > 360: # 6 minutes
+                print(f"DEBUG: System frozen for >6m. Active: {len(active_episodes)}, PostProc: {len(pending_postproc)}")
+                if wandb_logger is not None:
+                    ray.get(wandb_logger.alert.remote(title="Rollout Collection Frozen",text=f"Active Episodes: {len(active_episodes)}, Pending PostProc: {len(pending_postproc)}",level="ERROR"))
+                # Check 1: Are we waiting on a specific ref forever?
+                # Dump the first few active refs to inspect
+                import ipdb; ipdb.set_trace()
+
+            continue # Jump back to start of loop (and potentially dispatch more if resources freed up)
+
+        # CHANGE 3: Update timestamp when we actually get a result
+        last_dispatch_time = time.time()
         for ref in ready_refs:
-            
-            # --- CASE 1: A Habitat Finished Resetting ---
+
+            # --- CASE 1: Reset Finished ---
             if ref in pending_resets:
-                sim_handle = pending_resets.pop(ref)
-                print("new habitat worker ready!",end=" ")
-                # The worker is now ready for a VLM.
-                # We store the ref (initial observation) to pass to the supervisor.
-                ready_habitats.append((sim_handle, ref))
-            
-            # --- CASE 2: An Episode Finished ---
+                env_handle = pending_resets.pop(ref)
+                ready_sims.append((env_handle, ref))
+
+            # --- CASE 2: Episode Finished ---
             elif ref in active_episodes:
-                del active_episodes[ref]
-                # Retrieve the recycled actors and signals
-                # needs_reshard: bool indicating if the worker finished its assigned shard
-                vlm, hab, needs_reshard, stats = ray.get(ref)
-                print(f"[new results!] :{stats}")
-                results.append(stats)
-                # 1. Recycle VLM (It becomes idle immediately)
+                # print("handling finished episode")
+                dispatch_id, vlm, sim =  active_episodes.pop(ref)
+                # Unpack results
+                is_exhausted, result = ray.get(ref)
+                result_dict[dispatch_id] = result
+
+                # send vlm and sim to post episode processing
+                pp_ref = vlm.postprocess_episode.remote(**postprocess_kwargs)
+                pending_postproc[pp_ref] = vlm,dispatch_id
+
+                log_ref = sim.flush_logs_to_disk.remote()
+                pending_logs[log_ref] = sim,dispatch_id,is_exhausted
+
+            # --- CASE 3: VLM Post-Processing Finished ---
+            elif ref in pending_postproc:
+                vlm,dispatch_id = pending_postproc.pop(ref)
+                trajectory_buffer.append(ref)
+                trajectory_ids.append(dispatch_id)
                 idle_vlms.append(vlm)
-                
-                # 2. Recycle Habitat
+                print(f"Collected episode {len(trajectory_buffer)}")
+
+            # --- CASE 4: Sim Log Flush Finished
+            elif ref in pending_logs:
+                sim,dispatch_id,is_exhausted = pending_logs.pop(ref)
+                log_dict[dispatch_id] = ref # save the path to the log
+                # send the sim to reset/reshard so it can start working again asap
                 try:
-                    if needs_reshard:
-                        print("worker depleted! trying to assigning new shard")
-                        # Pull new work from the iterator
+                    # print("logging done",end="")
+                    if is_exhausted:
+                        # print("assigning shard")
                         new_shard = next(shard_iterator)
-                        hab.assign_shard.remote(new_shard)
-                    # Whether we got a new shard or are continuing the old one,
-                    # we must reset to prepare the next episode.
-                    new_reset_ref = hab.reset.remote()
-                    pending_resets[new_reset_ref] = hab
+                        sim.assign_shard.remote(new_shard)
+                    # print("resetting sim")
+                    new_reset_ref = sim.reset.remote()
+                    pending_resets[new_reset_ref] = sim
                 except StopIteration:
-                    ray.get(hab._flush_logs_to_disk.remote())
-                    # No more work available. Retire the Habitat worker.
-                    print(f"Worker finished and no shards remain. Retiring.")
+                    # No more work. Retire the Habitat worker.
+                    # iterator_exhausted = True
                     pass
-    print(f"Inference complete. Processed {len(results)} episodes.")
-    print(f"Cleaning up by forcing log flush...")
-    for sim_handle in tqdm(sim_handles):
-        ray.get(sim_handle._flush_logs_to_disk.remote())
-    print("done flushing!")
-    return results
+    rollouts = [t for _, t in sorted(zip(trajectory_ids, trajectory_buffer))]
+    log_dict |={v[1]:k for k,v in pending_logs.items()}
+    num_rollouts = len(rollouts)
+    result_list = [result_dict[i] for i in range(num_rollouts)]
+    log_list = [log_dict[i] for i in range(num_rollouts)]
+    return ray.get(rollouts), result_list, log_list
+
+

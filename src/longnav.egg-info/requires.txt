@@ -1,0 +1,14 @@
+datasets
+transformers
+ray[default]
+hydra-core
+fastapi[standard]
+pillow
+opencv-python
+torchvision
+torch
+peft
+wandb
+tensordict
+huggingface-hub
+codetiming

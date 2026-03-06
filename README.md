@@ -1,46 +1,55 @@
-## spatial_training
-
-Minimal utilities for **VLM SFT + Pose supervision**.
-- `training_scripts/train_sft.py`: SFT training
-- `training_scripts/train_pose.py`: Pose training (adds pose loss)
-- `training_scripts/build_pose_dataset.py`: build a HuggingFace dataset folder via `save_to_disk()`
-- `utils/`: collators, resize transform, pose loss, feature extractor
-
-### 1) Setup (Conda + pip)
-
-```bash
-cd /Projects/SG_VLN_HumanData/spatial_training
-conda create -y -p /root/conda_envs/spatial_training python=3.11
-conda activate /root/conda_envs/spatial_training
-python3 -m pip install -U pip
-python3 -m pip install -r requirements.txt
+## Installation 🛠️
+Create the main conda environment responsible for vlm trainer (simulator may need separate conda env).
+```
+conda create -n longnav python=3.10.16
 ```
 
-### 2) Train
-
-Single GPU:
-
-```bash
-export CUDA_VISIBLE_DEVICES=0
+Install with pip:
+```
+pip install -e .
 ```
 
-SFT:
+Make sure that the verl submodule is installed. 
 
-```bash
-python3 training_scripts/train_sft.py \
-  --model_id /Projects/SG_VLN_HumanData/SG-VLN/sft_pipeline/text_adapted_model \
-  --train_dataset_dir /Projects/SG_VLN_HumanData/spatial_training/data/habitat_web_pose_v1/train \
-  --eval_dataset_dir /Projects/SG_VLN_HumanData/spatial_training/data/habitat_web_pose_v1/validation \
-  --output_dir ./dump/sft_training_continue
+#### Note
+- verl has minor incompatibility with latest transformers. you may have to patch the verl code.
+
+- flash attention is supported, install is left as exercise to reader (wheel availability depends on machine)
+### Testing the Install
+Two basic tests are currently available to validate your install:
+
+[eval smoke test](tests/eval_smoke.py) (tests the rollout collection)
+```
+python3 tests/eval_smoke.py
 ```
 
-Pose:
-
-```bash
-python3 training_scripts/train_pose.py \
-  --model_id /Projects/SG_VLN_HumanData/SG-VLN/sft_pipeline/text_adapted_model \
-  --train_dataset_dir /Projects/SG_VLN_HumanData/spatial_training/data/habitat_web_pose_v1/train \
-  --eval_dataset_dir /Projects/SG_VLN_HumanData/spatial_training/data/habitat_web_pose_v1/validation \
-  --output_dir ./dump/pose_training_continue \
-  --resume_from_checkpoint /Projects/SG_VLN_HumanData/spatial_training/dump/pose_training_test/checkpoint-9500
+[rl smoke test](tests/rl_smoke.py) (tests one RL training step)
 ```
+python3 tests/rl_smoke.py
+```
+
+These may be referenced for integrating new Envs.
+## Training 🚀
+```
+python3 -m longnav.training_scripts.train_rl.py +experiment=<experiment_name>
+```
+- experiment_name must be a config that exists in src/conf/experiment.
+
+## Eval ⏱️
+```
+python3 -m longnav.eval.py +experiment=<experiment_name>
+```
+## Sim to Real Serving 🤖
+Serve the FAST API:
+```
+python3 -m longnav.serve
+```
+
+See the [client example](tools/client.py) for API usage.
+## Project Structure:
+### Configuration Management
+Config schemas are defined via data class in [config_schema.py](src/longnav/config_schema.py). The 
+### RL Env Interface
+See [dummy env structure](src/longnav/env/env_base.py) for reference. Any compatible Env may be used by the [rollout collection orchestration](src/longnav/utils/rollout_core.py) to produce rollouts for training steps.
+
+At a high level, the Env Actors return dictionaries of standard RL outputs. However, RGB observation is separated out for better Ray performance.

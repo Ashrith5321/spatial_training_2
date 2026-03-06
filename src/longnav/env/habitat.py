@@ -9,9 +9,10 @@ import uuid
 from PIL import Image
 import time
 import numpy as np
-from typing import Optional, Any
+from typing import Dict, Optional, Any, Tuple
 import cv2
 import numpy as np
+from enum import Enum, auto
 
 def motion_blur_kernel(k: int, angle_deg: float = 0.0) -> np.ndarray:
     if k <= 1:
@@ -105,7 +106,6 @@ def apply_schema(data, schema):
                 
     return result
 
-from enum import Enum, auto
 
 class TaskType(Enum):
     OBJECTNAV = auto()  # RGB + Object Category ID
@@ -428,10 +428,10 @@ class HabitatWorker:
             TopDownMapMeasurementConfig,
             FogOfWarConfig,
         )
-        import utils.measures #register custom measures
+        import longnav.utils.measures #register custom measures
         from habitat import make_dataset
-        import utils.ovon.ovon_dataset
-        import utils.ovon.ovon_nav
+        import longnav.utils.ovon.ovon_dataset
+        import longnav.utils.ovon.ovon_nav
         # try:
         #     import ovon.dataset.ovon_dataset #register ovon dataset
         #     import ovon.measurements.nav # register ovon measurements
@@ -586,7 +586,7 @@ class HabitatWorker:
         return self.full_dataset.num_episodes
     def assign_shard(self,assigned_episode_labels = None):
         from habitat.core.dataset import EpisodeIterator
-        import utils.measures
+        import longnav.utils.measures
         from habitat.gym import make_gym_from_config
         
         if hasattr(self, 'env') and self.env is not None:
@@ -836,7 +836,7 @@ class HabitatWorker:
                 float(rot.w)                                 # w
             ]
             if self.voxel_kwargs is not None:
-                from utils.bev_utils import get_patch_coords
+                from longnav.utils.bev_utils import get_patch_coords
                 H,W = step_dict['obs']['depth'].shape[:2] 
                 obs['+patch_coords'] = get_patch_coords(np.array([info['+pos_rots']]),step_dict['obs']['depth'].reshape((1,H,W)),**self.voxel_kwargs)[0] # 1 by H by W by 3 patch coords
         info['+scene_id']=get_scene_id(self.env.current_episode().scene_id)
@@ -1027,7 +1027,7 @@ class LoggingHabitatWorker(HabitatWorker):
         self.minimal_logging = minimal_logging
         os.makedirs(self.log_dir, exist_ok=True)
 
-    def _flush_logs_to_disk(self,clear_steps = True):
+    def flush_logs_to_disk(self,clear_steps = True):
         """
         Orchestrates saving heavy artifacts to disk and sending lightweight references to Ray.
         """
@@ -1116,12 +1116,12 @@ class LoggingHabitatWorker(HabitatWorker):
 
     def reset(self, episode_id=None,output_schema=None,logging_schema=None):
         if len(self.steps['action'])>0 and self.auto_flush:
-            self._flush_logs_to_disk()
+            self.flush_logs_to_disk()
         return super().reset(episode_id,output_schema,logging_schema)
 
     def assign_shard(self, assigned_episode_labels=None):
         if len(self.steps['action'])>0 and self.auto_flush:
-            self._flush_logs_to_disk()
+            self.flush_logs_to_disk()
         return super().assign_shard(assigned_episode_labels)
     
 if __name__ == "__main__":
@@ -1214,7 +1214,7 @@ if __name__ == "__main__":
     # 5. Verification
     # If the episode finished naturally, the MockLogger should have printed above.
     # We also verify the files exist on disk.
-    worker._flush_logs_to_disk() # Uncomment to force test if needed
+    worker.flush_logs_to_disk() # Uncomment to force test if needed
 
     print("\n=== Verifying Artifacts on Disk ===")
     
@@ -1243,4 +1243,55 @@ if __name__ == "__main__":
 
     print("\nTest Complete.")
     worker.close()
+
+
+class HabitatEnvActor(LoggingHabitatWorker):
+    """
+    Ray Actor wrapper for the LoggingHabitatWorker.
+
+    Optimizations:
+    1. Interface Shaping: Separates heavy RGB arrays from lightweight scalar state.
+    2. RPC Reduction: Injects 'is_exhausted' into the state dictionary.
+    """
+
+    def reset(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Returns:
+            rgb: The heavy image array.
+            state_dict: {'obs': ..., 'is_exhausted': ...}
+        """
+        # Base worker returns a single dict (typically just the observations for reset)
+        state_dict = super().reset()
+
+        # 1. Extract the heavy asset (modifies dict in place)
+        rgb = state_dict['obs'].pop("rgb")
+
+        state_dict['is_exhausted'] = self.is_exhausted()
+
+        if self.voxel_kwargs is None:
+            return rgb, state_dict
+        else:
+            patch_coords = state_dict['obs'].pop('patch_coords')
+            return rgb,patch_coords,state_dict
+
+
+    def step(self, action: int, supplementary_logs: Dict[str, Any] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Returns:
+            rgb: The heavy image array.
+            state_dict: {'obs': ..., 'reward': ..., 'done': ..., 'info': ..., 'is_exhausted': ...}
+        """
+        # Base worker returns a single dict containing keys: 'obs', 'reward', 'done', 'info'
+        state_dict = super().step(action, supplementary_logs=supplementary_logs)
+        # 1. Extract the heavy asset from the nested observation dict
+        # We modify the dictionary in-place to avoid copying data
+        rgb = state_dict['obs'].pop("rgb")
+        # 2. Inject the exhaustion flag
+        state_dict['is_exhausted'] = self.is_exhausted()
+        # 'result' now acts as our 'state_dict' (sans the heavy RGB)
+        if self.voxel_kwargs is None:
+            return rgb, state_dict
+        else:
+            patch_coords = state_dict['obs'].pop('patch_coords')
+            return rgb, patch_coords,state_dict
 
