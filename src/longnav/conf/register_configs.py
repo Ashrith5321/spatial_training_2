@@ -2,7 +2,7 @@ import os
 from omegaconf import OmegaConf
 from hydra.core.config_store import ConfigStore
 from hydra.utils import get_original_cwd
-from config_schema import *
+from longnav.config_schema import *
 # --- 1. The Resolver ---
 def read_text_from_file(path: str) -> str:
     # Use get_original_cwd so it works even when Hydra shifts directories
@@ -25,7 +25,7 @@ def register_configs():
     cs = ConfigStore.instance()
     cs.store(name="inference_config", node=InferenceConfig)
     cs.store(name="rl_config",node=RLConfig)
-    import conf.habitat_configs,conf.vlm_configs  # side effects (yikes)
+    import longnav.conf.habitat_configs,longnav.conf.vlm_configs  # side effects (yikes)
     cs.store(name="l2", group="resources", node=ResourceConfig(num_sims=3,num_vlms=2)) #local 2 gpu
     cs.store(name="l3", group="resources", node=ResourceConfig(num_sims=4,num_vlms=3)) #local 2 gpu
     cs.store(name="l4", group="resources", node=ResourceConfig(num_sims=5,num_vlms=4)) #local 2 gpu

@@ -15,12 +15,19 @@ def get_dummy_state() -> Dict[str, Any]:
             "info": {}
             }
 class DummyEnvActor:
+    '''
+    Dummy Environment that demonstrates the interface but uses dummy RGB data.
+    Reward is a trivial bandit problem: reward of 1 for stop, small negative reward otherwise. Episode ends when stop is taken or randomly with small probability.
+    '''
     def step(self, action: int, supplementary_logs: Dict[str, Any] = None):
         # generate random RGB data and state dict
         print(f"step {self.sc} of dummy env")
         self.sc += 1
         rgb = np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
-        return rgb, get_dummy_state()
+        state = get_dummy_state()
+        state['reward'] = -0.01 if action != 0 else 1.0 # reward of 1 for stop, small negative reward otherwise
+        state['done'] = state['done'] or action==0 # end episode
+        return rgb, state
     
     def reset(self):
         self.sc = 0

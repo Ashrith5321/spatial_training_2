@@ -176,7 +176,7 @@ class RolloutConfig:
     max_steps: int = 300
     temperature: float = 1.0
     action_space_str: str = "[stop, forward, left, right, up, down]"
-    system_prompt: str = "${read_text:conf/prompts/objectnav_prompt.txt}"
+    system_prompt: str = "${read_text:src/longnav/conf/prompts/objectnav_prompt.txt}"
     action_space: List[str] = field(default_factory=lambda: ["stop", "forward", "left", "right"])
     # Templates are lists of dicts (JSON-like)
     convo_start_template: List[Dict[str, Any]] = field(default_factory=lambda: [

@@ -211,6 +211,10 @@ class SimWorkerFactory:
 class WandbFactory:
     @staticmethod
     def create(run_cfg: RunConfig, res_cfg: ResourceConfig, full_dict_cfg: dict):
+        '''
+        Returns a Ray Actor for logging to WandB, and set of episode labels to skip.
+        Checks the episode_label column of the existing run (if any) to determine which episodes have already been logged, and returns that as a set to skip.
+        '''
         if not run_cfg.wandb_project: 
             return None
         
@@ -224,16 +228,24 @@ class WandbFactory:
         api = wandb.Api()
         # fetch latest run id matching name
         id = None
-        runs = api.runs(run_cfg.wandb_project,filters={"displayName":run_cfg.run_name})
+        try:
+            runs = api.runs(run_cfg.wandb_project,filters={"displayName":run_cfg.run_name})
+        except:
+            print(f"Could not fetch runs for project '{run_cfg.wandb_project}'. Check your WandB connection and project name.")
+            runs = []
+        print(f"Found {len(runs)} existing runs with name '{run_cfg.run_name}' in project '{run_cfg.wandb_project}'.")
         episodes_to_skip = set()
         if len(runs) > 0:
             # Sort runs by creation time descending      
             latest_run = runs[-1] #defualt wandb behavior oldest to newest. we resume from newest
             id = latest_run.id
             print(f"Resuming WandB run '{run_cfg.run_name}' with ID: {id}")
-            history = latest_run.history(samples=10000)
-            episodes_to_skip = set(history['episode_label'])
-            print(f"Skipping {len(episodes_to_skip)} episodes already logged in WandB.")
+            history = latest_run.history(samples=50000)
+            try:
+                episodes_to_skip = set(history['episode_label'])
+                print(f"Skipping {len(episodes_to_skip)} episodes already logged in WandB.")
+            except Exception as e:
+                print(f"Could not determine episodes to skip from WandB history: {e}")
         return RemoteLogger.remote(
             wandb_init_kwargs={
                 "project": run_cfg.wandb_project,
@@ -252,7 +264,8 @@ class ExpBootstrapper:
         # This turns ${read_text:...} into actual file content
         try:
             self.resolved_dict = OmegaConf.to_container(cfg, resolve=True)
-        except:
+        except Exception as e:
+            print(f"⚠️ Failed to resolve config interpolations: {e}")
             try:
                 from dataclasses import asdict
                 self.resolved_dict = asdict(cfg)

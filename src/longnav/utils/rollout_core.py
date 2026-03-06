@@ -270,8 +270,10 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
                     model_inputs = self.rl_seq_inputs
                 else:
                     raise ValueError("No stored model inputs found for postprocessing.")
-                logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
-                self.rl_trajectory['old_logprobs'] = logprobs
+                logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu()
+                if logprobs.dim() == 1:
+                    logprobs = logprobs.unsqueeze(0) # ensure batch dim
+                self.rl_trajectory['old_logprobs'] = logprobs.numpy()
                 if values is not None:
                     self.rl_trajectory['values'] = values.squeeze().float().cpu().numpy()
 
@@ -283,8 +285,10 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
                             logits,values = self._forward_embeds(self.rl_embeds_inputs,False)
                         elif self.rl_seq_inputs is not None:
                             logits,values = self._forward_seq(self.rl_seq_inputs)
-                        ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
-                        self.rl_trajectory['ref_logprobs'] = ref_logprobs
+                        ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu()
+                        if ref_logprobs.dim() == 1:
+                            ref_logprobs = ref_logprobs.unsqueeze(0) # ensure batch dim
+                        self.rl_trajectory['ref_logprobs'] = ref_logprobs.numpy()
 
         return self.rl_trajectory,model_inputs    
     

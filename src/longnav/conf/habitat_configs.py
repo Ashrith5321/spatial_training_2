@@ -1,5 +1,5 @@
 from hydra.core.config_store import ConfigStore
-from config_schema import HabitatConfig
+from longnav.config_schema import HabitatConfig
 cs = ConfigStore.instance()
 
 cs.store(name="voxel",group="sim", node=HabitatConfig(

@@ -1,0 +1,28 @@
+# @package _global_
+task:
+  output_dir: ./dump/rl_smoke
+  wandb_project: longnav_smoke_test
+  run_name: rl_smoke_test
+resources:
+  ray_address: 'local'
+  object_spilling_directory: ./ray_object_spilling
+  vlm_resource_tag: env_a
+  sim_resource_tag: env_b
+  master_addr: localhost
+  master_port: null
+  vlm_conda_env: null
+  habitat_conda_env: null
+
+  num_vlms: 1
+  osm_gb: 28
+  vlm_gpu_fraction: 0.3
+vlm:
+  attn_impl: "sdpa"
+  save_outputs: true
+rollout:
+  max_steps: 16
+  system_prompt: "guess a random action in [stop, forward, left, right] while ignoring each image."
+training:
+  rl_config:
+    n_rollout: 4
+    advantage_estimator: "reinforce_plus_plus"

@@ -76,7 +76,6 @@ class WandbLoggerActor:
         Processes a single episode row with namespace-based media detection.
         """
         processed_row = {}
-        
         # --- 1. Process & Filter ---
         for k, v in row.items():
             # A. Raw Data Toggle
@@ -128,7 +127,6 @@ class WandbLoggerActor:
             # Reset table to prevent O(N^2) slowdown and race conditions
             # self.table = wandb.Table(columns=self.columns, allow_mixed_types=True)
             self.rows_since_last_commit = 0 
-            
         self.run.log(log_payload)
 
     def _capture_system_metadata(self):
