@@ -149,6 +149,9 @@ class VLMWorker:
             return indices
         # 2. Find Prefix End
         prefix_np = np.array(self.prefix_ids)
+        # print(prefix_np)
+        # print()
+        # print(seq)
         prefix_starts = search_sequence_numpy(seq, prefix_np)
         prefix_start = prefix_starts[-1]
         if prefix_start == -1:

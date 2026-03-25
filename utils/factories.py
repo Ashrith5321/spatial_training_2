@@ -227,14 +227,17 @@ class WandbFactory:
         id = None
         runs = api.runs(run_cfg.wandb_project,filters={"displayName":run_cfg.run_name})
         episodes_to_skip = set()
-        if len(runs) > 0:
-            # Sort runs by creation time descending      
-            latest_run = runs[-1] #defualt wandb behavior oldest to newest. we resume from newest
-            id = latest_run.id
-            print(f"Resuming WandB run '{run_cfg.run_name}' with ID: {id}")
-            history = latest_run.history(samples=10000)
-            episodes_to_skip = set(history['episode_label'])
-            print(f"Skipping {len(episodes_to_skip)} episodes already logged in WandB.")
+        try:
+            if len(runs) > 0:
+                # Sort runs by creation time descending      
+                latest_run = runs[-1] #defualt wandb behavior oldest to newest. we resume from newest
+                id = latest_run.id
+                print(f"Resuming WandB run '{run_cfg.run_name}' with ID: {id}")
+                history = latest_run.history(samples=10000)
+                episodes_to_skip = set(history['episode_label'])
+                print(f"Skipping {len(episodes_to_skip)} episodes already logged in WandB.")
+        except Exception as e:
+            print(f"⚠️ Failed to resume WandB run: {e}, starting fresh.")
         return RemoteLogger.remote(
             wandb_init_kwargs={
                 "project": run_cfg.wandb_project,

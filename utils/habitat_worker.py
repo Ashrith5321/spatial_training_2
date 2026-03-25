@@ -258,7 +258,7 @@ def habitat_logging_helper(episode_data,summary_schema):
     episode_logs['n_steps'] = len(episode_data['action'])
     episode_logs['duration'] = episode_data['timestamp'][-1]-episode_data['timestamp'][0]
     episode_logs['throughput'] = episode_logs['n_steps']/max(episode_logs['duration'],1e-5)
-
+    episode_logs['env_latency'] = np.mean(np.array(episode_data['env_latency']))
     episode_logs['fpg_trigger_count'] = np.sum(np.array(episode_data['fp_stop'])) #works thanks to defaultdict shenanigans
     episode_logs['fng_trigger_count'] = np.sum(np.array(episode_data['fn_stop'])) #works thanks to defaultdict shenanigans
 
@@ -457,17 +457,17 @@ class HabitatWorker:
                 # Example: "/mnt/data/habitat/scene_datasets/"
                 self.config_env.habitat.dataset.scenes_dir = scenes_dir
             # Add TopDownMap for visualization
-            self.config_env.habitat.task.measurements.top_down_map = (
-                TopDownMapMeasurementConfig(
-                    map_padding=3,
-                    map_resolution=512,
-                    draw_goal_positions=True,
-                    draw_shortest_path=True,
-                    draw_view_points=True,
-                    draw_border=True,
-                    fog_of_war=FogOfWarConfig(draw=True, visibility_dist=20, fov=79),
-                )
-            )
+            # self.config_env.habitat.task.measurements.top_down_map = (
+            #     TopDownMapMeasurementConfig(
+            #         map_padding=3,
+            #         map_resolution=512,
+            #         draw_goal_positions=True,
+            #         draw_shortest_path=True,
+            #         draw_view_points=True,
+            #         draw_border=True,
+            #         fog_of_war=FogOfWarConfig(draw=True, visibility_dist=20, fov=79),
+            #     )
+            # )
 
         # Create Dataset
         self.full_dataset = make_dataset(
@@ -654,8 +654,9 @@ class HabitatWorker:
         except:
             print("warning! cannot calculate oracle guard!")
         import time
-        # t0 = time.time()
-        obs, reward, done, info = self.env.step(action)      
+        t0 = time.time()
+        obs, reward, done, info = self.env.step(action)  
+        extras['+env_latency'] = time.time()-t0  
         # print(f"stepping env took {time.time()-t0}")   
         # t0 = time.time()
 
@@ -663,20 +664,21 @@ class HabitatWorker:
         "obs":obs,
         "reward": reward,
         "done": done,
-        "info": info
+        "info": info,
         }
 
         if self.postprocess:
             step_dict = self._postprocess_step(step_dict)
             extras['+stuck'] = np.linalg.norm(np.array(self.last_step['info']['+pos_rots'])-np.array(step_dict['info']['+pos_rots']))<1e-5 # record collisions
             if extras['+stuck'] and self.collision_penalty is not None:
-                print("applying collision penalty")
+                # print("applying collision penalty")
                 step_dict['reward']-=self.collision_penalty #0.05
-            curr_explored_area = step_dict['info']['top_down_map']['fog_of_war_mask'].sum()
-            last_explored_area = self.last_step['info']['top_down_map']['fog_of_war_mask'].sum()
-            step_dict['+exploration_delta']=curr_explored_area-last_explored_area
-            print("applying exploration bonus")
-            if step_dict['+exploration_delta']>0 and self.explr_bonus is not None:
+
+            # print("applying exploration bonus")
+            if self.explr_bonus is not None:
+                curr_explored_area = step_dict['info']['top_down_map']['fog_of_war_mask'].sum()
+                last_explored_area = self.last_step['info']['top_down_map']['fog_of_war_mask'].sum()
+                step_dict['+exploration_delta']=curr_explored_area-last_explored_area
                 step_dict['reward']+=self.explr_bonus
             if action==0 and info['distance_to_goal']>self.config_env.habitat.task.measurements.success.success_distance:
                 if self.fpstop_penalty is not None:
