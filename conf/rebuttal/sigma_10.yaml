@@ -90,7 +90,7 @@ sim:
   explr_bonus: null
   collision_penalty: 0.02
 task:
-  run_name: hm3d_rpp_ke_s10
+  run_name: hm3d_rpp_ke_s10_fast
   wandb_project: rebuttal_train
   shard_size: 0
   subset_label: ''
