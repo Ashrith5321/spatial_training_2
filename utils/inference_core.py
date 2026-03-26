@@ -294,7 +294,7 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
 
             if self.rl_algo_config.use_ref:
                 with torch.no_grad():
-                    self.unmerge_adapter()
+                    self.unmerge_adapter() 
                     with self.model.disable_adapter():
                         if self.rl_embeds_inputs is not None:
                             logits,values = self._forward_embeds(self.rl_embeds_inputs,None,False)
