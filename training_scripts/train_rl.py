@@ -52,6 +52,7 @@ def main(cfg: RLConfig):
     from verl.trainer.ppo.core_algos import get_adv_estimator_fn,AdvantageEstimator,POLICY_LOSS_REGISTRY
     import signal
     import json
+    import time
 
     def debug_signal_handler(sig, frame):
         # should allow us to interrupt the loop, save data etc, and resume
@@ -116,6 +117,9 @@ def main(cfg: RLConfig):
         with open(filepath,'wb') as f:
             pickle.dump(obj,f)
 
+    step_counter = 0
+    episode_counter=0
+    start_time = time.time()
     try:
         shard_iter = get_shard_iterator(
             subset_label= cfg.task.subset_label,
@@ -237,6 +241,8 @@ def main(cfg: RLConfig):
                     # We catch exceptions here to prevent one failed batch from crashing the loop
                     try:
                         result = ray.get(ref)
+                        episode_counter+=1
+
                         rollout_idx = future_metadata[ref]
 
                         batch_row = traj_batch[rollout_idx] 
@@ -254,6 +260,7 @@ def main(cfg: RLConfig):
                             "rollout/rtn_var": traj_stats['returns'].var().item(),
                             "rollout/global_cycle": global_cycle
                         }
+                        step_counter+=rollout_stats['rollout/ep_len']
                         try:
                             critic_mse = ((traj_stats['baseline']-traj_stats['returns'])**2).mean()
                             naive_mse = ((traj_stats['returns'] - global_return_mean)**2).mean().item()
@@ -279,6 +286,14 @@ def main(cfg: RLConfig):
                             logger.warning(f"Log file for rollout {rollout_idx} not ready (Sim Worker I/O Lag). Skipping detailed logs.")
                         except Exception as e:
                             logger.warning(f"Failed to read log file: {e}")
+                        try:
+                            result['episode_duration']=result_list[rollout_idx]['episode_duration']
+                            result['episode_rollout_throughput']= result['rollout/ep_len']/result['episode_duration']
+                        except Exception as e:
+                            logger.warning(f"Failed to add results: {e}")
+                        result['total_steps']=step_counter
+                        result['steps_per_second']=step_counter/(time.time()-start_time)
+                        result['episodes_per_minute']=episode_counter/(time.time()-start_time)*60
                         wandb_actor.log_row.remote(result)
                         completed_count += 1
                      
@@ -293,10 +308,10 @@ def main(cfg: RLConfig):
                 ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{global_cycle}")))
             else:
                 print(f"T-{steps_until_save} steps until checkpoint!")
-            print("saving debug...")
-            pickle_obj(traj_batch, f"tb_{global_cycle}")
-            pickle_obj(result_list, f"result_{global_cycle}")
-            pickle_obj(ray.get(log_list),f"logpaths_{global_cycle}")
+            # print("saving debug...")
+            # pickle_obj(traj_batch, f"tb_{global_cycle}")
+            # pickle_obj(result_list, f"result_{global_cycle}")
+            # pickle_obj(ray.get(log_list),f"logpaths_{global_cycle}")
             del model_inputs
     finally:
 

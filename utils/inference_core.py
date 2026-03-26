@@ -98,6 +98,7 @@ class EpisodeRolloutMixin:
     
     def run_episode(self,habitat_handle, initial_state_ref,collect_trajectory=False,compute_value=False):
         import time
+        ep_t0 = time.time()
         self.reset() #we reset at the start to ensure clean state. not resetting at the end preserves state for downstream.
         try:
             # 1. Resolve the initial state (Blocking wait for reset to finish)
@@ -196,6 +197,7 @@ class EpisodeRolloutMixin:
             final_trajectory = self._pack_trajectory(trajectory_buffer) if collect_trajectory else None
             final_info = state_dict['info'] | {"steps":step_count, "instr_or_goal":instr_or_goal}
             # Return Clean Tuple (No Actor Handles here)
+            final_info['episode_duration'] = time.time()-ep_t0
             return habitat_handle, state_dict['is_exhausted'], final_info, final_trajectory
         
         except Exception as e:
