@@ -7,7 +7,6 @@ from contextlib import contextmanager
 import json
 import uuid
 from PIL import Image
-import time
 import numpy as np
 from typing import Optional, Any
 @contextmanager
@@ -653,7 +652,6 @@ class HabitatWorker:
                 extras['+fn_stop'] = 1
         except:
             print("warning! cannot calculate oracle guard!")
-        import time
         t0 = time.time()
         obs, reward, done, info = self.env.step(action)  
         extras['+env_latency'] = time.time()-t0  

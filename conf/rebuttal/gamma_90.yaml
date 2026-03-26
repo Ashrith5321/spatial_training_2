@@ -8,7 +8,7 @@ resources:
   master_addr: localhost
   master_port: null
   num_vlms: 4
-  num_sims: 4
+  num_sims: 5
   vlm_conda_env: vlm_node_1016
   habitat_conda_env: vln
   vlm_gpu_fraction: 0.7
