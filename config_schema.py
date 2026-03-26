@@ -31,6 +31,7 @@ class VLMConfig:
     vocab: List[str] = field(default_factory=lambda: ["stop", "forward", "left", "right"])
     offload_cache: bool = False
     use_sparse: bool = True
+    sparse_thresh: float = 0.95
     save_outputs: bool = False # only need this for RL
 
     # clip_cov_ratio = config.policy_loss.clip_cov_ratio if config.policy_loss.clip_cov_ratio is not None else 0.0002

@@ -7,7 +7,6 @@ from contextlib import contextmanager
 import json
 import uuid
 from PIL import Image
-import time
 import numpy as np
 from typing import Optional, Any
 @contextmanager
@@ -637,6 +636,8 @@ class HabitatWorker:
             supplementary logs: dict of extra info to log for this step. useful for recording action logprobs, agent inference latency, etc
                 - WARNING: if you provide this, you MUST provide it every step, with the same keys. otherwise your data won't align properly!
         """
+        t0 = time.time()
+        duration = 0
         self.reset_flag = False
         extras = {'+fp_stop':-99999*int(not self.fp_guard),'+fn_stop':-99999*int(not self.fn_guard)} # massive neg for not enabled, 0 for enabled but not triggerd.
         # oracle stop guards useful for reducin eval noise. #TODO: use habitat config instead of magic number
@@ -653,11 +654,10 @@ class HabitatWorker:
                 extras['+fn_stop'] = 1
         except:
             print("warning! cannot calculate oracle guard!")
-        import time
-        # t0 = time.time()
+        duration+=(time.time()-t0)
         obs, reward, done, info = self.env.step(action)      
         # print(f"stepping env took {time.time()-t0}")   
-        # t0 = time.time()
+        t0 = time.time()
 
         step_dict = {
         "obs":obs,
@@ -670,12 +670,12 @@ class HabitatWorker:
             step_dict = self._postprocess_step(step_dict)
             extras['+stuck'] = np.linalg.norm(np.array(self.last_step['info']['+pos_rots'])-np.array(step_dict['info']['+pos_rots']))<1e-5 # record collisions
             if extras['+stuck'] and self.collision_penalty is not None:
-                print("applying collision penalty")
+                # print("applying collision penalty")
                 step_dict['reward']-=self.collision_penalty #0.05
             curr_explored_area = step_dict['info']['top_down_map']['fog_of_war_mask'].sum()
             last_explored_area = self.last_step['info']['top_down_map']['fog_of_war_mask'].sum()
             step_dict['+exploration_delta']=curr_explored_area-last_explored_area
-            print("applying exploration bonus")
+            # print("applying exploration bonus")
             if step_dict['+exploration_delta']>0 and self.explr_bonus is not None:
                 step_dict['reward']+=self.explr_bonus
             if action==0 and info['distance_to_goal']>self.config_env.habitat.task.measurements.success.success_distance:
@@ -696,6 +696,9 @@ class HabitatWorker:
             self._cache_step(self._apply_schema(step_dict | extras,self.logging_schema) | supplementary_logs )
             self.steps['action'].append(action)
         self.last_step = step_dict
+        duration+=(time.time()-t0)
+        if(duration>0.01):
+            print(f"warning: housekeepin took {duration}")
         # print(f"postprocessing took {time.time()-t0}")
         return self._apply_schema(step_dict | extras,self.output_schema)
 
@@ -1020,7 +1023,8 @@ class LoggingHabitatWorker(HabitatWorker):
         # 2. Calculate Metrics & Split Data
         # Returns scalars (episode_logs) and raw lists (sequence_logs)
         episode_logs, sequence_logs = habitat_logging_helper(self.steps,self.summary_schema)
-    
+        print(f"episode: ")
+        print(episode_logs)
         # 3. Generate & Save Video + Thumbnail
         # Uses your helper. Returns (video_path_string, PIL_Image)
         if not self.minimal_logging:
@@ -1032,7 +1036,6 @@ class LoggingHabitatWorker(HabitatWorker):
                 return_thumbnail=True
             )
             episode_logs["vid/episode_video"] = vid_path  # Path for WandB Video
-            seq_path = os.path.join(save_dir, "sequence.json")
             episode_logs["raw/trace"] =  seq_path          # Path for WandB Artifact/File
             # Manually save the thumbnail object to disk
             thumb_path = os.path.join(save_dir, "thumbnail.jpg")
@@ -1040,6 +1043,7 @@ class LoggingHabitatWorker(HabitatWorker):
             episode_logs["img/thumbnail"] = thumb_path    # Path for WandB Image
         
         ep_path = os.path.join(save_dir,"summary.json")
+        seq_path = os.path.join(save_dir, "sequence.json")
 
         episode_logs |= {
              "worker_pid": os.getpid(),
@@ -1054,10 +1058,10 @@ class LoggingHabitatWorker(HabitatWorker):
             if isinstance(obj, np.floating): return float(obj)
             if isinstance(obj, np.ndarray): return obj.tolist()
             return str(obj)
-        if not self.minimal_logging:
-            # sequence logs are heavy
-            with open(seq_path, 'w') as f:
-                json.dump(sequence_logs, f, default=default_serializer,indent=4)
+        # sequence logs are heavy
+        print("writing files:")
+        with open(seq_path, 'w') as f:
+            json.dump(sequence_logs, f, default=default_serializer,indent=4)
 
         with open(os.path.join(self.log_dir,f"results_{os.getpid()}"),'a') as f:
             f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result
@@ -1065,7 +1069,7 @@ class LoggingHabitatWorker(HabitatWorker):
         with open(ep_path, 'w') as f:
             json.dump(episode_logs, f, default=default_serializer,indent=4) # append to cumulative logs
             # f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result
-
+        print(f"files written to {self.log_dir}")
         # 5. Construct Global Payload (Paths + Scalars)
         # Merge the scalar metrics with the file paths
         payload = {
@@ -1077,6 +1081,7 @@ class LoggingHabitatWorker(HabitatWorker):
 
         # 6. Send to Global Logger
         if self.logger_actor:
+            print("logging to wandb")
             import ray
             try:
                 ray.get(self.logger_actor.log_row.remote(row=payload),timeout=1.0) 
@@ -1096,7 +1101,6 @@ class LoggingHabitatWorker(HabitatWorker):
         return super().assign_shard(assigned_episode_labels)
     
 if __name__ == "__main__":
-    import time
     import numpy as np
     import os
 

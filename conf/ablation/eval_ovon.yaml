@@ -4,7 +4,7 @@ task:
   wandb_project: "new_rl_ovon_full"
   shard_size: 6
   subset_label: ""
-  episode_json: "conf/episode_jsons/ovon_val_seen_synonyms.json"
+  episode_json: "conf/episode_jsons/ovon_val_unseen.json"
   output_dir: ./dump/rl_eval
   jobtype: eval
 resources:
@@ -14,8 +14,8 @@ resources:
   sim_resource_tag: env_b
   master_addr: localhost
   master_port: null
-  num_vlms: 4
-  num_sims: 5
+  num_vlms: 2
+  num_sims: 3
   vlm_conda_env: null
   habitat_conda_env: null
   vlm_gpu_fraction: 0.6
@@ -48,7 +48,7 @@ sim:
   config_path: conf/habitat/objectnav_hm3d_ovon_rgbd_semantic.yaml
   workspace: null
   scenes_dir: null
-  split: val_seen_synonyms
+  split: val_unseen
   fp_guard: true
   fn_guard: false
   voxel_kwargs: null

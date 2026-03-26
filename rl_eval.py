@@ -95,7 +95,7 @@ def main(cfg: RLConfig):
             pickle.dump(obj,f)
     
     # ------------------------------------------- rollouts ------------------------------------------
-    batch_size = 32 # fixed batch size decoupled from RL logic for eval
+    batch_size = 4 # fixed batch size decoupled from RL logic for eval
     for i in range(max(math.ceil(len(all_episodes)/batch_size),1)):
         logger.info("Starting rollout collection!")
         # bootstrapper.typed_cfg.training.rl_config.n_rollout
