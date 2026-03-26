@@ -156,6 +156,9 @@ class EpisodeRolloutMixin:
 
                 entropy = -np.sum(action_probs * np.log(action_probs + 1e-9))
                 vlm_logs |= {'mean/entropy':entropy,'mean/action_prob':float(action_probs[action_id]),"action_probs":action_probs.tolist()} 
+                vlm_logs |= {'mean/token_keep_fraction':float(self.seq_keep_mask.float().mean())}
+                vlm_logs |= {'mean/num_tokens':int(self.seq_keep_mask.shape[-1])}
+
                 # D. Store Transition
                
 

@@ -34,7 +34,7 @@ def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor
     return kl
 
 class VLMWorker:
-    def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_impl='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],save_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,save_pixels=False):
+    def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_impl='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],save_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,save_pixels=False,sparse_thresh="error"):
         import transformers.modeling_flash_attention_utils as fa_utils
         def patched(position_ids, batch_size):
             return False
@@ -55,7 +55,7 @@ class VLMWorker:
         self.offload_cache = offload_cache
         self.use_sparse = use_sparse
         self.bev_canvas_size = bev_canvas_size
-        
+        self.sparse_thresh = sparse_thresh
         self._is_merged = None
         self._is_lora = None
         # Warmup the CUDA allocator
@@ -399,7 +399,8 @@ class VLMWorker:
                 past_key_values=self.past_key_values,
                 use_cache=True,
                 # logits_to_keep = logit_indices.to(self.model.device)
-                logits_to_keep=1
+                logits_to_keep=1,
+                sparse_thresh = self.sparse_thresh
             )
             self.past_key_values = outputs['past_key_values']
              # Compute logprobs directly (1-to-1 mapping)
