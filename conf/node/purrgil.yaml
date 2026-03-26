@@ -10,6 +10,7 @@ resources:
   master_port: null
   vlm_conda_env: vlm_node_1016
   habitat_conda_env: vln
+  osm_gb: 500
 sim:
-  workspace: /Projects
+  workspace: /Projects/spatial_training
 
