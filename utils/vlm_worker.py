@@ -12,7 +12,7 @@ from torch.optim import AdamW
 from dataclasses import dataclass,field
 # from transformers.models.qwen3_vl.modeling_qwen3_vl import rotate_half
 import torch.nn.functional as F
-
+from contextlib import nullcontext
 def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> torch.Tensor:
     """
     Computes the token-level KL divergence: KL(pi || ref) = sum(pi * (log_pi - log_ref))
@@ -34,7 +34,8 @@ def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor
     return kl
 
 class VLMWorker:
-    def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_impl='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],save_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,save_pixels=False):
+    def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_impl='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],save_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,save_pixels=False
+                 ,infer_with_base_model=False):
         import transformers.modeling_flash_attention_utils as fa_utils
         def patched(position_ids, batch_size):
             return False
@@ -55,7 +56,7 @@ class VLMWorker:
         self.offload_cache = offload_cache
         self.use_sparse = use_sparse
         self.bev_canvas_size = bev_canvas_size
-        
+        self.infer_with_base_model = infer_with_base_model
         self._is_merged = None
         self._is_lora = None
         # Warmup the CUDA allocator
@@ -346,7 +347,7 @@ class VLMWorker:
         if self.model is None:
             self.load_model()
             self.reset()
-        if self.using_lora() and not self.is_merged():
+        if not self.infer_with_base_model and self.using_lora() and not self.is_merged():
             self.merge_adapter() # for inference speed
             pass
         # print(f"lora merge time: {time.time()-t0}",end=" ")
@@ -391,44 +392,48 @@ class VLMWorker:
             turn_inputs['attention_mask'] = self.cumulative_inputs['attention_mask'].to(self.device)
         if self.save_outputs:
             turn_inputs['save_embeds'] = True
-
         with torch.inference_mode():
-            t = time.time()
-            outputs = self.model.forward(
-                **turn_inputs,
-                past_key_values=self.past_key_values,
-                use_cache=True,
-                # logits_to_keep = logit_indices.to(self.model.device)
-                logits_to_keep=1
-            )
-            self.past_key_values = outputs['past_key_values']
-             # Compute logprobs directly (1-to-1 mapping)
-            relevant_logits = outputs.logits[0].float()
-            if not full_logprobs:
-                relevant_logits = relevant_logits[...,self.vocab_ids]
-            if np.abs(temperature-1.0) > 1e-7:
-                logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
-            else:
-                logprobs = torch.log_softmax(relevant_logits, dim=-1)
-            # print(f"vlm latency: {time.time()-t}",end=" ")
+            maybe_disable_adapter = nullcontext()
+            if self.infer_with_base_model:
+                print("disabling adapter to infer with base")
+                maybe_disable_adapter = self.model.disable_adapter()
+            with maybe_disable_adapter:
+                t = time.time()
+                outputs = self.model.forward(
+                    **turn_inputs,
+                    past_key_values=self.past_key_values,
+                    use_cache=True,
+                    # logits_to_keep = logit_indices.to(self.model.device)
+                    logits_to_keep=1
+                )
+                self.past_key_values = outputs['past_key_values']
+                # Compute logprobs directly (1-to-1 mapping)
+                relevant_logits = outputs.logits[0].float()
+                if not full_logprobs:
+                    relevant_logits = relevant_logits[...,self.vocab_ids]
+                if np.abs(temperature-1.0) > 1e-7:
+                    logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
+                else:
+                    logprobs = torch.log_softmax(relevant_logits, dim=-1)
+                # print(f"vlm latency: {time.time()-t}",end=" ")
 
-            if self.save_outputs:
-                t = time.time()
-                self._store_outputs(outputs)
-                # print(f"store outputs time: {time.time()-t}",end=" ")
-            if self.use_sparse:
-                t = time.time()
-                current_keep_mask = self.language_model.seq_keep_mask
-                self.vis_keep_masks.append(self.language_model.vis_keep_mask.cpu())
-                if self.seq_keep_mask is None:
-                    self.seq_keep_mask = current_keep_mask.cpu()
-                else:
-                    self.seq_keep_mask = torch.cat((self.seq_keep_mask,current_keep_mask.cpu()))
-                if self.past_image_embeds is None:
-                    self.past_image_embeds = self.language_model.kept_visual_embeds
-                else:
-                    for idx, image_embeds in enumerate(self.language_model.kept_visual_embeds):
-                        self.past_image_embeds[idx] = torch.cat((self.past_image_embeds[idx],image_embeds)) #handle the batching...
+                if self.save_outputs:
+                    t = time.time()
+                    self._store_outputs(outputs)
+                    # print(f"store outputs time: {time.time()-t}",end=" ")
+                if self.use_sparse:
+                    t = time.time()
+                    current_keep_mask = self.language_model.seq_keep_mask
+                    self.vis_keep_masks.append(self.language_model.vis_keep_mask.cpu())
+                    if self.seq_keep_mask is None:
+                        self.seq_keep_mask = current_keep_mask.cpu()
+                    else:
+                        self.seq_keep_mask = torch.cat((self.seq_keep_mask,current_keep_mask.cpu()))
+                    if self.past_image_embeds is None:
+                        self.past_image_embeds = self.language_model.kept_visual_embeds
+                    else:
+                        for idx, image_embeds in enumerate(self.language_model.kept_visual_embeds):
+                            self.past_image_embeds[idx] = torch.cat((self.past_image_embeds[idx],image_embeds)) #handle the batching...
                 # print(f"store sparse states time: {time.time()-t}",end=" ")
         # if check_probs:
         #     try:
@@ -518,6 +523,7 @@ class VLMWrapper(nn.Module):
         self._freeze_vision_tower()
 
     def _forward_embeds(self,embeds_inputs,compute_values=False,value_grad_scale=0.1):
+        print("embed forward")
         embeds_inputs = {k:v.to('cuda') for k,v in embeds_inputs.items()}
         embeds_inputs['inputs_embeds'] = embeds_inputs['inputs_embeds'].to(self.vlm.dtype)
         if self.vlm.training:
@@ -527,20 +533,25 @@ class VLMWrapper(nn.Module):
         embeds_inputs.pop('input_ids_reference')
         embeds_inputs['seq_keep_mask']='everything' # force keeping everything since seq is already sparse
         hidden = self.vlm.language_model(**embeds_inputs).last_hidden_state
+        print("lm pass success")
         values = None
-        if compute_values:
-            value_hidden = hidden[:,logits_to_keep].to(self.vlm.value_head.dtype)
-            if value_grad_scale<=0:
-                # 1. Fully Detached (Old way)
-                value_hidden = value_hidden.detach()
-            
-            else:             
-                # Forward: Identity. Backward: Gradient * scale.
-                value_hidden = (value_hidden * value_grad_scale) + (value_hidden.detach() * (1 - value_grad_scale))
+        try:
+            if compute_values:
+                value_hidden = hidden[:,logits_to_keep].to(self.vlm.value_head.dtype)
+                if value_grad_scale<=0:
+                    # 1. Fully Detached (Old way)
+                    value_hidden = value_hidden.detach()
+                
+                else:             
+                    # Forward: Identity. Backward: Gradient * scale.
+                    value_hidden = (value_hidden * value_grad_scale) + (value_hidden.detach() * (1 - value_grad_scale))
 
 
-            values = self.vlm.value_head(value_hidden).squeeze(-1)
+                values = self.vlm.value_head(value_hidden).squeeze(-1)
+        except Exception as e:
+            print(f"error: {e}")
         logits = self.vlm.lm_head(hidden[:,logits_to_keep])
+        print("forward pass success")
         return logits,values
 
     def forward(self, mode = "embeds_inputs",**inputs):
@@ -836,6 +847,28 @@ class VLMTrainingMixin:
             metrics['train/rollout_kl_divergence'] = kld.mean().item()        
         return loss,metrics
     
+    def critic_mse_loss(self,returns,vpreds,response_mask,**kwargs):
+        from verl.trainer.ppo.core_algos import compute_value_loss,compute_entropy_loss
+        metrics = {}
+        print("calculating critic loss")
+        # print(returns.shape)
+        # print(vpreds.shape)
+        # print(response_mask)
+        returns = returns.to(vpreds.device)
+        response_mask = response_mask.to(vpreds.device).bool()
+        valid_values = torch.masked_select(vpreds, response_mask)
+        valid_returns = torch.masked_select(returns,response_mask)
+        # loss,vf_clipfrac = compute_value_loss(vpreds,returns,old_values.to(log_prob.device),response_mask,self.rl_algo_config.cliprange_value)
+        loss = torch.nn.functional.mse_loss(valid_values,valid_returns,reduction='mean', weight=None)
+        print("loss calculated!")
+        # metrics['critic/vf_clipfrac'] = vf_clipfrac.detach().item()
+        metrics['train/vf_loss'] = loss.detach().item()
+
+        return_diff_var = torch.var(valid_returns - valid_values).cpu()
+        return_var = torch.var(valid_returns).cpu()
+        metrics['critic/explained_variance']=(1.0 - return_diff_var / (return_var + 1e-5)).detach().item()
+        return loss
+    
     def bc_loss(self, log_probs, expert_actions, dagger_mask, label_smoothing=0.1, **kwargs):
         """
         Behavior Cloning / DAgger Loss.
@@ -893,16 +926,25 @@ class VLMTrainingMixin:
         Generic train step that can be used for both RL, SFT, or any unholy combination thereof
         '''
         self._setup_training()
+        print("starting training")
         # Accumulate gradients (handle micro-batches)
         with self.accelerator.accumulate(self.ddp_model):
             loss = torch.tensor(0.0).to(self.device)
             metrics = {}
             logits,vpreds = self._training_forward(embeds_inputs)
-            log_probs = self._calculate_action_logprobs(logits) # B by S by N_action space
+            try:
+                log_probs = self._calculate_action_logprobs(logits) # B by S by N_action space
+            except Exception as e:
+                log_probs = None
+                print(f"failed to compute logprobs! {e}")
             if loss_weights is None:
                 loss_weights = [1.0]*len(loss_fn_names)
+            print(loss_fn_names)
+            print()
             for loss_fn_name,weight in zip(loss_fn_names,loss_weights):
+                print("getting loss")
                 loss_fn = getattr(self, f"{loss_fn_name}_loss")
+                print("done")
                 loss_part,metric = loss_fn(log_probs=log_probs,vpreds=vpreds,logits=logits,**loss_kwargs_list[loss_fn_name])
                 loss = loss + loss_part*weight
                 metrics |= metric

@@ -51,7 +51,7 @@ def main(cfg: RLConfig):
     logger = get_console_logger()
 
     bootstrapper.setup_cluster()
-    trainers = bootstrapper.bootstrap_vlms_rl(training=False) #allocate vlms first to prevent out of room issues
+    trainers = bootstrapper.bootstrap_vlms_rl(training=True) #allocate vlms first to prevent out of room issues
     wandb_actor,episodes_to_skip = bootstrapper.bootstrap_logger()
     sim_logger = wandb_actor
     sims = bootstrapper.bootstrap_sims(sim_logger)

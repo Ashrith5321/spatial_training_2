@@ -402,6 +402,8 @@ class HabitatWorker:
             TopDownMapMeasurementConfig,
             FogOfWarConfig,
         )
+        from habitat.gym import make_gym_from_config
+
         import utils.measures #register custom measures
         from habitat import make_dataset
         import utils.ovon.ovon_dataset
@@ -472,13 +474,28 @@ class HabitatWorker:
         self.full_dataset = make_dataset(
             self.config_env.habitat.dataset.type, config=self.config_env.habitat.dataset
         )
+            
+        with suppress_cpp_output():
+            self.env = make_gym_from_config(self.config_env,self.full_dataset)
+            self._resolve_task_specific_logic() # dependent on the env, so use here
+            self.nav_oracle = ObjectNavOracle(
+            self.env.habitat_env,
+            success_distance=self.config_env.habitat.task.measurements.success.success_distance, 
+        ) 
+            
+        if self.output_schema is None:
+            self.output_schema = self._generate_auto_schema(True)
+        if self.logging_schema is None:
+            self.logging_schema = self._generate_auto_schema(True)
+        if self.logging_schema == "light":
+            self.logging_schema = self._generate_auto_schema(False)
+        self.summary_schema=self._generate_auto_schema()['info']
+        
         self.ep_seed = ep_seed
       
-
         if assigned_episode_labels is not None:
             self.assign_shard(assigned_episode_labels)
         else:
-            print("skipping sim initialization since no shards provided, please call assign_shard")
             self.episode_counter = 0
             self.shard_length = 0
 
@@ -558,19 +575,14 @@ class HabitatWorker:
             raise TypeError(f"Instruction must be str, got {type(val)}")
     def total_episodes(self):
         return self.full_dataset.num_episodes
+    
     def assign_shard(self,assigned_episode_labels = None):
-        from habitat.core.dataset import EpisodeIterator
-        import utils.measures
-        from habitat.gym import make_gym_from_config
-        
-        if hasattr(self, 'env') and self.env is not None:
-            self.env.close()
         self.steps = defaultdict(list)
         self.last_step = None
         self.reset_flag = False
         self.assigned_labels = set(assigned_episode_labels) if assigned_episode_labels is not None else None
 
-        if self.assigned_labels is not None:
+        if assigned_episode_labels is not None:
             # Filter Episodes
             def filter_fn(eps):
                 scene_id = get_scene_id(eps.scene_id)
@@ -589,40 +601,35 @@ class HabitatWorker:
             print("WARNING: Assigned shard is empty!")
         self.episode_counter = 0 #distinguish from "steps" concept per episode
 
+        self._assign_episodes(dataset.episodes)
         # Initialize Env
         # self.env = Env(self.config_env, dataset)
-        with suppress_cpp_output():
-            self.env = make_gym_from_config(self.config_env,dataset)
-            self._resolve_task_specific_logic() # dependent on the env, so use here
-        self.nav_oracle = ObjectNavOracle(
-            self.env.habitat_env,
-            success_distance=self.config_env.habitat.task.measurements.success.success_distance, 
-        )
+
         # self.env = make_gym_from_config(self.config_env,dataset)
+
+
+    def _assign_episodes(self,episode_list):
+                # Setup Iterator 
+        from habitat.core.dataset import EpisodeIterator
+        import utils.measures
+            
         if self.ep_seed is not None:
             seed = self.ep_seed
         else:
             np.random.seed(os.getpid())
             seed = np.random.randint(0,100000)
             print(f"using seed: {seed}")
-        # Setup Iterator 
+            
         self.env.habitat_env.episode_iterator = EpisodeIterator(
-            dataset.episodes,
+            episode_list,
             cycle=True,
             shuffle=True,
             group_by_scene=False,
             seed=seed,
             max_scene_repeat_episodes=4
         )
-        if self.output_schema is None:
-            self.output_schema = self._generate_auto_schema(True)
-        if self.logging_schema is None:
-            self.logging_schema = self._generate_auto_schema(True)
-        if self.logging_schema == "light":
-            self.logging_schema = self._generate_auto_schema(False)
-        self.summary_schema=self._generate_auto_schema()['info']
 
-        print(f"Actor assigned with shard of {len(dataset.episodes)} episodes.")
+        print(f"Actor assigned with shard of {len(episode_list)} episodes.")
 
 
     def step(self, action:int,supplementary_logs={}):

@@ -197,7 +197,7 @@ class RolloutConfig:
         {"role": "assistant", "content": [{"type": "text", "text": "**forward**"}]}
     ])
     stop_prob_threshold: Optional[float] = None
-
+    use_base_model: bool = False
 
 # --- Experiment housekeeping ---
 @dataclass

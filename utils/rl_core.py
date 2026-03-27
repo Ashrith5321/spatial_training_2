@@ -66,15 +66,18 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
             padded = padded.squeeze(-1)
             
         batch[key] = padded
-    
-    batch['old_log_prob'] = batch['old_logprobs'].gather(2, batch['actions'].unsqueeze(-1)).squeeze(-1)
+    try:
+        batch['old_log_prob'] = batch['old_logprobs'].gather(2, batch['actions'].unsqueeze(-1)).squeeze(-1)
+        bs = batch['old_log_prob'].shape[:2]
+    except:
+        bs = batch['actions'].shape[:2]
     # 3. Create Response Mask
     # 1 for valid tokens, 0 for padding
     response_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
     for i, length in enumerate(lengths):
         response_mask[i, :length] = 1
     batch['response_mask'] = response_mask
-    return TensorDict(batch,batch_size=batch['old_log_prob'].shape[:2])
+    return TensorDict(batch,batch_size=bs)
 
 def collate_debug_trajectories(trajectory_list: list[dict], device='cpu'):
     """

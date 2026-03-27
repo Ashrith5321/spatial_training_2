@@ -239,6 +239,9 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
         
         # 2. Initialize Rollout Config
         self.rollout_config = rollout_config
+        self.infer_with_base_model = rollout_config['use_base_model']
+        if(self.infer_with_base_model):
+            print("inference disables adapters by config!")
         
     def run_episode(self,habitat_handle,initial_state_ref,rtn_inputs = False,rtn_embeds=True):
         '''
@@ -262,7 +265,7 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
             self.rl_seq_inputs = inputs
         return habitat_handle,is_exhausted,state_dict,trajectory,inputs,embeds
 
-    def postprocess_episode(self,eval=False):
+    def postprocess_episode(self,eval=False,**kwargs):
         '''
         clears the internal state and returns the processed trajectory and model inputs.
         - trajectory includes: 
@@ -299,7 +302,8 @@ class RLWorker(RolloutWorker,VLMTrainingMixin):
                             logits,values = self._forward_seq(self.rl_seq_inputs,None,False)
                         ref_logprobs = self._calculate_action_logprobs(logits).squeeze().float().cpu().numpy()
                         self.rl_trajectory['ref_logprobs'] = ref_logprobs
-
+        if kwargs.get('mode',None) == 'record_embeds':
+            model_inputs = self.rl_embeds_inputs
         return self.rl_trajectory,model_inputs    
     
 class RLRayWorker(RLWorker):
@@ -307,8 +311,8 @@ class RLRayWorker(RLWorker):
         habitat_handle,is_exhausted,state_dict,_,_,_ = super().run_episode(habitat_handle, initial_state_ref)
         return ray.get_runtime_context().current_actor,habitat_handle,is_exhausted,state_dict
     
-    def postprocess_episode(self,return_inputs = True,eval=False):
-        trajectory,model_inputs = super().postprocess_episode(eval=eval)
+    def postprocess_episode(self,return_inputs = True,eval=False,**kwargs):
+        trajectory,model_inputs = super().postprocess_episode(eval=eval,**kwargs)
         if return_inputs:
             inputs_tensors,inputs_metadata = TensorPacker.pack(model_inputs)
             return trajectory,inputs_tensors,inputs_metadata
@@ -357,7 +361,23 @@ class RLRayWorker(RLWorker):
                 }
             }
         )
-
+        
+    def pretrain_critic_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch):
+        embeds_inputs = TensorPacker.unpack(embeds_inputs_np, embeds_inputs_meta, device=self.accelerator.device)
+        returns = traj_batch['returns']
+        response_mask = traj_batch['response_mask'] 
+        return super().generic_train_step(
+            embeds_inputs=embeds_inputs,
+            loss_fn_names=['critic_mse'],
+            loss_kwargs_list={
+                'critic_mse': {
+                    'response_mask': response_mask,
+                    'returns': returns,
+                    
+                },
+            },
+        )
+    
     def train_dagrl_step(self, embeds_inputs_np, embeds_inputs_meta, traj_batch,rl_weight=1.0,bc_weight=0.1):
         """
         Hybrid Step: PPO + DAgger.
