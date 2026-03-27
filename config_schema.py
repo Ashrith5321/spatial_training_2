@@ -53,6 +53,7 @@ class RLAlgoConfig:
     advantage_estimator: str = "gae"
     policy_loss_name: str = "vanilla"
     n_rollout: int = 12 # note: must be divisible by num vlms times gradient accumulation
+    group_size: int = 4 # number of trajectories to group together for advantage estimation. should divide n_rollout
     n_adv: int = 256 # number of trajectories for advantage estimation, must > n_rollout
     n_epoch: int = 2 # number of policy gradient epochs
 

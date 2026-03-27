@@ -52,7 +52,7 @@ def collate_trajectories(trajectory_list: list[dict], device='cpu'):
             t = torch.tensor(arr, device=device)
             if key in ['rewards', 'values', 'old_logprobs', 'logprobs', 'ref_logprobs']:
                 t = t.float() # Ensure float32
-            elif key in ['actions']:
+            elif key in ['actions','episode_idx']:
                 t = t.long()  # Ensure int32 for pointer
             tensors.append(t)
             
@@ -299,6 +299,161 @@ def collect_rollouts(
     result_list = [result_dict[i] for i in range(num_rollouts)]
     log_list = [log_dict[i] for i in range(num_rollouts)]
     return ray.get(rollouts), result_list, log_list
+
+def grouped_rollouts(
+    sim_handles: list,
+    vlm_handles: list,
+    episode_index_list: list[int],
+    group_size: int = 4,
+    postprocess_kwargs = {"return_inputs":True, "eval":False}
+) -> tuple[list,list,list]:
+    """
+    Orchestrates the RL collection pipeline in a "grouped" style.
+
+    returns: trajectory buffer, result list, log list, indexed by dispatch_id
+    """
+    # --- 0. Create Episode Index Iterator ---
+    def episode_index_generator():
+        for i in range(group_size):
+            for ep_idx in episode_index_list:
+                yield ep_idx # 
+    ep_gen = episode_index_generator()
+    target_episodes = len(episode_index_list) * group_size
+    # --- 1. Initialize Pools ---
+    idle_vlms = deque(vlm_handles)
+    ready_sims = deque() 
+
+    # --- 2. Tracking Futures ---
+    pending_resets = {}   # reset_ref -> sim_handle
+    active_episodes = {}  # ep_ref -> dispatch_id
+    
+    # VLM post-processing
+    pending_postproc = {} # pp_ref -> vlm_handle, dispatch_id 
+    # Sim logging
+    pending_logs = {} # log_ref -> sim_handle, dispatch_id
+
+    trajectory_buffer = []
+    trajectory_ids = []
+
+    result_dict = {}
+    log_dict = {}
+    iterator_exhausted = False
+
+    last_dispatch_time = time.time()
+    # --- 3. Bootstrap: Initial Sharding & Resets (IDENTICAL) ---
+    for sim_handle in sim_handles:
+        try:
+            ep_idx = next(ep_gen)
+            reset_ref = sim_handle.reset.remote(episode_idx=ep_idx)
+            pending_resets[reset_ref] = sim_handle   
+        except StopIteration:
+            iterator_exhausted = True
+            print("Warning: Not enough shards for all workers during bootstrap.")
+            pass
+    print(f"Bootstrapping: Initializing {len(sim_handles)} environments...")
+    initial_live_sims = len(pending_resets)
+    # Helper to check if we should keep the loop alive
+    def has_work():
+
+        # 1. Are tasks currently running?
+        is_active = len(active_episodes) > 0 or len(pending_postproc) > 0#or len(pending_logs) > 0
+        # 2. Do we still want to launch new tasks (now or in the future)? (Resources available AND Target not met)
+        potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
+        want_launch = (potential < target_episodes) and initial_live_sims > 0
+        return is_active or want_launch
+    
+    dispatch_counter = 0
+    # --- Event Loop ---
+    while has_work():
+        # A. Dispatch (IDENTICAL)
+        total_potential = len(trajectory_buffer) + len(active_episodes) + len(pending_postproc)
+        
+        while (idle_vlms and ready_sims and total_potential < target_episodes):
+            vlm = idle_vlms.popleft()
+            sim, init_state_ref = ready_sims.popleft()
+            ep_ref = vlm.run_episode.remote(sim, init_state_ref)
+            active_episodes[ep_ref] = dispatch_counter
+            dispatch_counter +=1
+            total_potential +=1
+
+
+        # B. Wait for Events
+        all_watch_refs = list(pending_resets.keys()) + \
+                         list(active_episodes.keys()) + \
+                         list(pending_postproc.keys()) + \
+                         list(pending_logs.keys())
+        
+        if not all_watch_refs:
+            break
+
+        ready_refs, _ = ray.wait(all_watch_refs, num_returns=1,timeout=15.0)
+        if not ready_refs:
+            # If we get here, the orchestrator is "stuck" waiting.
+            # We can use this moment to diagnose.
+            
+            # Simple deadlock detector:
+            current_time = time.time()
+            if current_time - last_dispatch_time > 360: # 6 minutes
+                print(f"DEBUG: System frozen for >6m. Active: {len(active_episodes)}, PostProc: {len(pending_postproc)}")
+                
+                # Check 1: Are we waiting on a specific ref forever?
+                # Dump the first few active refs to inspect
+                import ipdb; ipdb.set_trace() 
+            
+            continue # Jump back to start of loop (and potentially dispatch more if resources freed up)
+
+        # CHANGE 3: Update timestamp when we actually get a result
+        last_dispatch_time = time.time()
+        for ref in ready_refs:
+            
+            # --- CASE 1: Reset Finished ---
+            if ref in pending_resets:
+                sim_handle = pending_resets.pop(ref)
+                ready_sims.append((sim_handle, ref))
+            
+            # --- CASE 2: Episode Finished ---
+            elif ref in active_episodes:
+                # print("handling finished episode")
+                dispatch_id =  active_episodes.pop(ref)
+                # Unpack results
+                vlm, sim, is_exhausted, state = ray.get(ref)
+                result_dict[dispatch_id] = state
+
+                # send vlm and sim to post episode processing
+                pp_ref = vlm.postprocess_episode.remote(**postprocess_kwargs)
+                pending_postproc[pp_ref] = vlm,dispatch_id
+
+                log_ref = sim._flush_logs_to_disk.remote()
+                pending_logs[log_ref] = sim,dispatch_id,is_exhausted                
+            
+            # --- CASE 3: VLM Post-Processing Finished ---
+            elif ref in pending_postproc:
+                vlm,dispatch_id = pending_postproc.pop(ref)    
+                trajectory_buffer.append(ref)
+                trajectory_ids.append(dispatch_id)
+                idle_vlms.append(vlm)
+                print(f"Collected episode {len(trajectory_buffer)}")
+
+            # --- CASE 4: Sim Log Flush Finished
+            elif ref in pending_logs:
+                sim,dispatch_id,is_exhausted = pending_logs.pop(ref)
+                log_dict[dispatch_id] = ref # save the path to the log
+                # send the sim to reset/reshard so it can start working again asap
+                try:
+                    ep_idx = next(ep_gen)
+                    new_reset_ref = sim.reset.remote(episode_idx=ep_idx)
+                    pending_resets[new_reset_ref] = sim
+                except StopIteration:
+                    # No more work. Retire the Habitat worker.
+                    iterator_exhausted = True
+                    pass
+    rollouts = [t for _, t in sorted(zip(trajectory_ids, trajectory_buffer))]
+    log_dict |={v[1]:k for k,v in pending_logs.items()}
+    num_rollouts = len(rollouts)
+    result_list = [result_dict[i] for i in range(num_rollouts)]
+    log_list = [log_dict[i] for i in range(num_rollouts)]
+    return ray.get(rollouts), result_list, log_list
+
 
 
 def apply_hybrid_splitting(batch, dagger_percentile=0.3, only_failures=True, stop_action_id=0,max_dagger_steps=500):

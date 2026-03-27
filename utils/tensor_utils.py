@@ -65,7 +65,9 @@ class TensorPacker:
             target_dtype = getattr(torch, metadata['dtype'])
             
             # 2. Convert back to Tensor
-            tensor = torch.from_numpy(packed_obj)
+            # tensor = torch.from_numpy(packed_obj)
+            tensor = torch.tensor(packed_obj)
+
             # 3. Cast and Move
             # Note: from_numpy always creates CPU tensor. We move/cast as needed.
             return tensor.to(dtype=target_dtype)

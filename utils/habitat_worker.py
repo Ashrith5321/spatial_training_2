@@ -498,7 +498,9 @@ class HabitatWorker:
         else:
             self.episode_counter = 0
             self.shard_length = 0
-
+        self.last_step = None
+        self.reset_flag = False
+        self.episode_idx = None # for use in single episode mode
     def _resolve_task_specific_logic(self):
         """
         rigorously detects the TaskType by inspecting the observation space 
@@ -722,7 +724,7 @@ class HabitatWorker:
             labels.append(episode_label)
         return labels
     
-    def _reset(self, episode_id=None,output_schema=None,logging_schema=None):
+    def _reset(self, episode_idx=None,output_schema=None,logging_schema=None):
         """
         Args:
             episode_id: please don't try this.
@@ -731,12 +733,14 @@ class HabitatWorker:
         # Access the habitat core environment
         self.steps = defaultdict(list)  # Clear video cache for new episode
 
-        if episode_id is not None:
+        if episode_idx is not None:
             # Find specific episode
-            episodes = self.env.habitat_env._dataset.episodes
-            episode = next((e for e in episodes if e.episode_id == str(episode_id)), None)
-            self.env.habitat_env._current_episode = episode
-
+            self._assign_episodes(self.full_dataset.episodes[episode_idx:episode_idx+1])
+            self.shard_length = 1
+            self.episode_idx = episode_idx
+        else:
+            self.episode_idx = None
+            
         if output_schema is not None:
             self.output_schema = output_schema
         if logging_schema is not None:
@@ -823,7 +827,8 @@ class HabitatWorker:
         curr_idx = self.episode_counter-1
         info['+epoch']= curr_idx // self.shard_length
         info['+step_in_epoch']=curr_idx % self.shard_length
-        
+        if(self.episode_idx is not None):
+            info['+episode_idx']=self.episode_idx
         try:
             if self.log_oracle:
                 oracle_action = self.nav_oracle.get_best_action()

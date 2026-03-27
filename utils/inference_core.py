@@ -182,6 +182,8 @@ class EpisodeRolloutMixin:
                         "distance_to_goal": state_dict['info']['distance_to_goal'],
                         "oracle_actions": oracle_action_id
                     }
+                    if 'episode_idx' in state_dict['info']:
+                        trajectory_dict['episode_idx'] = state_dict['info']['episode_idx']
                     if compute_value:
                         import torch
                         # Compute value estimate for the current state
@@ -446,14 +448,14 @@ class HabitatRayWorker(LoggingHabitatWorker):
     2. RPC Reduction: Injects 'is_exhausted' into the state dictionary.
     """
 
-    def reset(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def reset(self,episode_idx=None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Returns:
             rgb: The heavy image array.
             state_dict: {'obs': ..., 'is_exhausted': ...}
         """
         # Base worker returns a single dict (typically just the observations for reset)
-        state_dict = super().reset()
+        state_dict = super().reset(episode_id=episode_idx)
         
         # 1. Extract the heavy asset (modifies dict in place)
         rgb = state_dict['obs'].pop("rgb")

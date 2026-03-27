@@ -395,7 +395,7 @@ class VLMWorker:
         with torch.inference_mode():
             maybe_disable_adapter = nullcontext()
             if self.infer_with_base_model:
-                print("disabling adapter to infer with base")
+                # print("disabling adapter to infer with base")
                 maybe_disable_adapter = self.model.disable_adapter()
             with maybe_disable_adapter:
                 t = time.time()
@@ -523,7 +523,7 @@ class VLMWrapper(nn.Module):
         self._freeze_vision_tower()
 
     def _forward_embeds(self,embeds_inputs,compute_values=False,value_grad_scale=0.1):
-        print("embed forward")
+        # print("embed forward")
         embeds_inputs = {k:v.to('cuda') for k,v in embeds_inputs.items()}
         embeds_inputs['inputs_embeds'] = embeds_inputs['inputs_embeds'].to(self.vlm.dtype)
         if self.vlm.training:
@@ -533,25 +533,24 @@ class VLMWrapper(nn.Module):
         embeds_inputs.pop('input_ids_reference')
         embeds_inputs['seq_keep_mask']='everything' # force keeping everything since seq is already sparse
         hidden = self.vlm.language_model(**embeds_inputs).last_hidden_state
-        print("lm pass success")
+        # print(f"lm pass success: {hidden.shape}")
         values = None
         try:
             if compute_values:
+                # print("computing values")
                 value_hidden = hidden[:,logits_to_keep].to(self.vlm.value_head.dtype)
                 if value_grad_scale<=0:
                     # 1. Fully Detached (Old way)
                     value_hidden = value_hidden.detach()
-                
                 else:             
                     # Forward: Identity. Backward: Gradient * scale.
                     value_hidden = (value_hidden * value_grad_scale) + (value_hidden.detach() * (1 - value_grad_scale))
 
-
+                # print(f"value head pass with hidden: {value_hidden.shape}")
                 values = self.vlm.value_head(value_hidden).squeeze(-1)
         except Exception as e:
             print(f"error: {e}")
         logits = self.vlm.lm_head(hidden[:,logits_to_keep])
-        print("forward pass success")
         return logits,values
 
     def forward(self, mode = "embeds_inputs",**inputs):
@@ -850,24 +849,23 @@ class VLMTrainingMixin:
     def critic_mse_loss(self,returns,vpreds,response_mask,**kwargs):
         from verl.trainer.ppo.core_algos import compute_value_loss,compute_entropy_loss
         metrics = {}
-        print("calculating critic loss")
         # print(returns.shape)
         # print(vpreds.shape)
         # print(response_mask)
         returns = returns.to(vpreds.device)
         response_mask = response_mask.to(vpreds.device).bool()
-        valid_values = torch.masked_select(vpreds, response_mask)
-        valid_returns = torch.masked_select(returns,response_mask)
+
+        valid_values = vpreds[response_mask]
+        valid_returns = returns[response_mask]
         # loss,vf_clipfrac = compute_value_loss(vpreds,returns,old_values.to(log_prob.device),response_mask,self.rl_algo_config.cliprange_value)
-        loss = torch.nn.functional.mse_loss(valid_values,valid_returns,reduction='mean', weight=None)
-        print("loss calculated!")
+        loss = torch.nn.functional.mse_loss(valid_values,valid_returns,reduction='mean')
         # metrics['critic/vf_clipfrac'] = vf_clipfrac.detach().item()
         metrics['train/vf_loss'] = loss.detach().item()
 
         return_diff_var = torch.var(valid_returns - valid_values).cpu()
         return_var = torch.var(valid_returns).cpu()
         metrics['critic/explained_variance']=(1.0 - return_diff_var / (return_var + 1e-5)).detach().item()
-        return loss
+        return loss,metrics
     
     def bc_loss(self, log_probs, expert_actions, dagger_mask, label_smoothing=0.1, **kwargs):
         """
@@ -926,25 +924,17 @@ class VLMTrainingMixin:
         Generic train step that can be used for both RL, SFT, or any unholy combination thereof
         '''
         self._setup_training()
-        print("starting training")
         # Accumulate gradients (handle micro-batches)
         with self.accelerator.accumulate(self.ddp_model):
             loss = torch.tensor(0.0).to(self.device)
             metrics = {}
             logits,vpreds = self._training_forward(embeds_inputs)
-            try:
-                log_probs = self._calculate_action_logprobs(logits) # B by S by N_action space
-            except Exception as e:
-                log_probs = None
-                print(f"failed to compute logprobs! {e}")
+            log_probs = self._calculate_action_logprobs(logits) # B by S by N_action space
+
             if loss_weights is None:
                 loss_weights = [1.0]*len(loss_fn_names)
-            print(loss_fn_names)
-            print()
             for loss_fn_name,weight in zip(loss_fn_names,loss_weights):
-                print("getting loss")
                 loss_fn = getattr(self, f"{loss_fn_name}_loss")
-                print("done")
                 loss_part,metric = loss_fn(log_probs=log_probs,vpreds=vpreds,logits=logits,**loss_kwargs_list[loss_fn_name])
                 loss = loss + loss_part*weight
                 metrics |= metric

@@ -15,10 +15,9 @@ resources:
   sim_gpu_fraction: 0.14
   vlm_cpus: 4
   sim_cpus: 4
-
+  osm_gb: 50
 rollout:
-  use_base_model: true
-  max_steps: 200
+  max_steps: 50
   temperature: 1.0
   action_space_str: '[stop, forward, left, right, up, down]'
   system_prompt: ${read_text:conf/prompts/objectnav_prompt.txt}
@@ -64,11 +63,11 @@ vlm:
   use_sparse: true
   save_outputs: true
 sim:
-  config_path: conf/habitat/hm3d_training.yaml
+  config_path: conf/habitat/objectnav_hm3d_rgbd_semantic.yaml
   dataset_path: null
   workspace: null
   scenes_dir: null
-  split: val
+  split: train_mini
   fp_guard: false
   fn_guard: false
   voxel_kwargs: null
@@ -92,12 +91,12 @@ sim:
   explr_bonus: null
   collision_penalty: 0.02
 task:
-  run_name: test2_critic_pretrain
-  wandb_project: rebuttal_adv_baselines
+  run_name: profiling
+  wandb_project: rebuttal_train
   shard_size: 0
   subset_label: ''
   episode_json: ''
-  output_dir: ./dump/critic_training
+  output_dir: ./dump/rl_training
   jobtype: train
 training:
   checkpoint: null
@@ -107,16 +106,18 @@ training:
   grad_accum_steps: 1
   mixed_precision: 'no'
   gradient_checkpointing: true
-  total_optimization_steps: 5000
+  total_optimization_steps: 20000
   warmup_steps: 32
   save_step: 8
-  value_head_learning_rate: 0.00001
+  value_head_learning_rate: 0.0005
   value_head_dropout: 0.0
   value_head_dtype: float32
-  value_head_hidden_dims: []
+  value_head_hidden_dims:
+  - 1024
+  - 512
   peft_config:
-    r: 64
-    lora_alpha: 64
+    r: 128
+    lora_alpha: 256
     lora_dropout: 0.0
     bias: none
     task_type: CAUSAL_LM
@@ -131,18 +132,37 @@ training:
     modules_to_save: null
     use_rslora: false
   rl_config:
-    use_value: true
-    value_grad_scale: 1.0
+    use_value: false
+    value_grad_scale: 0.1
     advantage_estimator: reinforce_plus_plus_time_kernel
     policy_loss_name: clip_cov
-    n_rollout: 9
+    n_rollout: 6
     n_adv: 256
-    n_epoch: 2
+    n_epoch: 1
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    clip_ratio_c: 3.0
+    loss_agg_mode: token-mean
+    policy_loss:
+      clip_cov_ratio: 0.0002
+      clip_cov_ub: 5.0
+      clip_cov_lb: 1.0
     gamma: 0.95
     lam: 0.95
-    time_kernel_sigma: 40.0
+    time_kernel_sigma: 10.0
     time_alignment: start
     time_loto: false
+    distance_kernel_sigma: 0.5
+    distance_clip_max: 17.0
+    distance_clip_percentile: 0.95
+    distance_pad_mode: replicate
+    distance_pad_val: null
+    cliprange_value: 0.2
+    entropy_bonus: 0.002
+    use_ref: true
+    kl_coeff: 0.001
+    kl_target: 0.1
     global_batch_info: {}
   sft_config: null
 hab_config_list: null

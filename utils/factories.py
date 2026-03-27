@@ -269,7 +269,7 @@ class ExpBootstrapper:
                     res.sim_resource_tag: res.num_sims,
                 },
                 ignore_reinit_error=True,
-                object_store_memory = res.osm_gb * 1024 * 1024 * 1024,
+                object_store_memory = res.osm_gb * 1000 * 1000 * 1000,
                 object_spilling_directory = res.object_spilling_directory, _system_config=system_config,
             )
         else:
