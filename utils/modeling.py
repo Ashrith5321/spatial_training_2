@@ -247,7 +247,7 @@ class Qwen3VLSparseTextModel(Qwen3VLTextModel):
                             # TODO: Append empty placeholder to self.kept_visual_embeds to maintain alignment for B > 1
                             continue
                         # Get indices of embeddings to KEEP (relative to the visual segments)
-                        embeds_to_keep_rel_idx,filtered_embeds = filter_embeds(image_embeds,past_image_embeds[b] if past_image_embeds is not None else None,max_global_keep=27000,threshold=0.95) #TODO: eliminate magic numbers, previously 0.95
+                        embeds_to_keep_rel_idx,filtered_embeds = filter_embeds(image_embeds,past_image_embeds[b] if past_image_embeds is not None else None,max_global_keep=27000,threshold=kwarg['sparse_thresh']) #TODO: eliminate magic numbers, previously 0.95
                         if save_image_db:
                             self.kept_visual_embeds.append(filtered_embeds.cpu().clone())
                         # MAP RELATIVE INDICES -> GLOBAL INDICES

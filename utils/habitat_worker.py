@@ -643,6 +643,8 @@ class HabitatWorker:
             supplementary logs: dict of extra info to log for this step. useful for recording action logprobs, agent inference latency, etc
                 - WARNING: if you provide this, you MUST provide it every step, with the same keys. otherwise your data won't align properly!
         """
+        t0 = time.time()
+        duration = 0
         self.reset_flag = False
         extras = {'+fp_stop':-99999*int(not self.fp_guard),'+fn_stop':-99999*int(not self.fn_guard)} # massive neg for not enabled, 0 for enabled but not triggerd.
         # oracle stop guards useful for reducin eval noise. #TODO: use habitat config instead of magic number
@@ -663,7 +665,7 @@ class HabitatWorker:
         obs, reward, done, info = self.env.step(action)  
         extras['+env_latency'] = time.time()-t0  
         # print(f"stepping env took {time.time()-t0}")   
-        # t0 = time.time()
+        t0 = time.time()
 
         step_dict = {
         "obs":obs,
@@ -703,6 +705,9 @@ class HabitatWorker:
             self._cache_step(self._apply_schema(step_dict | extras,self.logging_schema) | supplementary_logs )
             self.steps['action'].append(action)
         self.last_step = step_dict
+        duration+=(time.time()-t0)
+        if(duration>0.01):
+            print(f"warning: housekeepin took {duration}")
         # print(f"postprocessing took {time.time()-t0}")
         return self._apply_schema(step_dict | extras,self.output_schema)
 
@@ -1027,7 +1032,8 @@ class LoggingHabitatWorker(HabitatWorker):
         # 2. Calculate Metrics & Split Data
         # Returns scalars (episode_logs) and raw lists (sequence_logs)
         episode_logs, sequence_logs = habitat_logging_helper(self.steps,self.summary_schema)
-    
+        print(f"episode: ")
+        print(episode_logs)
         # 3. Generate & Save Video + Thumbnail
         # Uses your helper. Returns (video_path_string, PIL_Image)
         if not self.minimal_logging:
@@ -1039,7 +1045,6 @@ class LoggingHabitatWorker(HabitatWorker):
                 return_thumbnail=True
             )
             episode_logs["vid/episode_video"] = vid_path  # Path for WandB Video
-            seq_path = os.path.join(save_dir, "sequence.json")
             episode_logs["raw/trace"] =  seq_path          # Path for WandB Artifact/File
             # Manually save the thumbnail object to disk
             thumb_path = os.path.join(save_dir, "thumbnail.jpg")
@@ -1047,6 +1052,7 @@ class LoggingHabitatWorker(HabitatWorker):
             episode_logs["img/thumbnail"] = thumb_path    # Path for WandB Image
         
         ep_path = os.path.join(save_dir,"summary.json")
+        seq_path = os.path.join(save_dir, "sequence.json")
 
         episode_logs |= {
              "worker_pid": os.getpid(),
@@ -1061,10 +1067,10 @@ class LoggingHabitatWorker(HabitatWorker):
             if isinstance(obj, np.floating): return float(obj)
             if isinstance(obj, np.ndarray): return obj.tolist()
             return str(obj)
-        if not self.minimal_logging:
-            # sequence logs are heavy
-            with open(seq_path, 'w') as f:
-                json.dump(sequence_logs, f, default=default_serializer,indent=4)
+        # sequence logs are heavy
+        print("writing files:")
+        with open(seq_path, 'w') as f:
+            json.dump(sequence_logs, f, default=default_serializer,indent=4)
 
         with open(os.path.join(self.log_dir,f"results_{os.getpid()}"),'a') as f:
             f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result
@@ -1072,7 +1078,7 @@ class LoggingHabitatWorker(HabitatWorker):
         with open(ep_path, 'w') as f:
             json.dump(episode_logs, f, default=default_serializer,indent=4) # append to cumulative logs
             # f.write(json.dumps(episode_logs,default=default_serializer)+"\n") #save the result
-
+        print(f"files written to {self.log_dir}")
         # 5. Construct Global Payload (Paths + Scalars)
         # Merge the scalar metrics with the file paths
         payload = {
@@ -1084,6 +1090,7 @@ class LoggingHabitatWorker(HabitatWorker):
 
         # 6. Send to Global Logger
         if self.logger_actor:
+            print("logging to wandb")
             import ray
             try:
                 ray.get(self.logger_actor.log_row.remote(row=payload),timeout=1.0) 
@@ -1103,7 +1110,6 @@ class LoggingHabitatWorker(HabitatWorker):
         return super().assign_shard(assigned_episode_labels)
     
 if __name__ == "__main__":
-    import time
     import numpy as np
     import os
 

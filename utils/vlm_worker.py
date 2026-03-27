@@ -34,8 +34,12 @@ def compute_full_kl_penalty(log_probs: torch.Tensor, ref_log_probs: torch.Tensor
     return kl
 
 class VLMWorker:
+<<<<<<< HEAD
     def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_impl='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],save_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,save_pixels=False
                  ,infer_with_base_model=False):
+=======
+    def __init__(self, model_id="Qwen/Qwen3-VL-2B-Instruct",attn_impl='sdpa',dtype='float16', prefix = '<|im_start|>assistant\n**',postfix = '**<|im_end|>',vocab=["stop","forward","left","right","up","down"],save_outputs=False,load_model=True,offload_cache=False,use_sparse=False,bev_canvas_size=2000,save_pixels=False,sparse_thresh="error"):
+>>>>>>> d68d3b19fe64d4f719befc64103b79d21d5eedfd
         import transformers.modeling_flash_attention_utils as fa_utils
         def patched(position_ids, batch_size):
             return False
@@ -56,7 +60,11 @@ class VLMWorker:
         self.offload_cache = offload_cache
         self.use_sparse = use_sparse
         self.bev_canvas_size = bev_canvas_size
+<<<<<<< HEAD
         self.infer_with_base_model = infer_with_base_model
+=======
+        self.sparse_thresh = sparse_thresh
+>>>>>>> d68d3b19fe64d4f719befc64103b79d21d5eedfd
         self._is_merged = None
         self._is_lora = None
         # Warmup the CUDA allocator
@@ -393,6 +401,7 @@ class VLMWorker:
         if self.save_outputs:
             turn_inputs['save_embeds'] = True
         with torch.inference_mode():
+<<<<<<< HEAD
             maybe_disable_adapter = nullcontext()
             if self.infer_with_base_model:
                 print("disabling adapter to infer with base")
@@ -416,6 +425,27 @@ class VLMWorker:
                 else:
                     logprobs = torch.log_softmax(relevant_logits, dim=-1)
                 # print(f"vlm latency: {time.time()-t}",end=" ")
+=======
+            t = time.time()
+            outputs = self.model.forward(
+                **turn_inputs,
+                past_key_values=self.past_key_values,
+                use_cache=True,
+                # logits_to_keep = logit_indices.to(self.model.device)
+                logits_to_keep=1,
+                sparse_thresh = self.sparse_thresh
+            )
+            self.past_key_values = outputs['past_key_values']
+             # Compute logprobs directly (1-to-1 mapping)
+            relevant_logits = outputs.logits[0].float()
+            if not full_logprobs:
+                relevant_logits = relevant_logits[...,self.vocab_ids]
+            if np.abs(temperature-1.0) > 1e-7:
+                logprobs = torch.log_softmax(relevant_logits/temperature, dim=-1)
+            else:
+                logprobs = torch.log_softmax(relevant_logits, dim=-1)
+            # print(f"vlm latency: {time.time()-t}",end=" ")
+>>>>>>> d68d3b19fe64d4f719befc64103b79d21d5eedfd
 
                 if self.save_outputs:
                     t = time.time()
