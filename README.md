@@ -1,3 +1,7 @@
+# LongNav
+This repository provides the implementation of LongNav. 
+
+### 🚧 🚧 under construction 🚧🚧
 ## Installation 🛠️
 Create the main conda environment responsible for vlm trainer (simulator may need separate conda env).
 ```
