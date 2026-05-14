@@ -1,6 +1,7 @@
 datasets
-transformers
-ray[default]
+torch==2.8.0
+transformers<5.0
+ray[default]==2.53.0
 hydra-core
 fastapi[standard]
 pillow

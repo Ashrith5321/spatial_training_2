@@ -13,7 +13,7 @@ class ResourceConfig:
     master_port: Optional[int] = None #port for accelerate/ddp
     num_vlms: int = 1
     num_sims: int = 1
-    vlm_conda_env: Optional[str] = "longnav_vlm"
+    vlm_conda_env: Optional[str] = "vlm_node_1016"
     habitat_conda_env: Optional[str] = "vln"
     vlm_gpu_fraction: float = 0.7
     sim_gpu_fraction: float = 0.14

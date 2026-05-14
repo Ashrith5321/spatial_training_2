@@ -3,22 +3,32 @@ This repository provides the implementation of LongNav.
 
 ### 🚧 🚧 under construction 🚧🚧
 ## Installation 🛠️
-Create the main conda environment responsible for vlm trainer (simulator may need separate conda env).
+### RL trainer
+Create the main conda environment responsible for vlm trainer
 ```
-conda create -n longnav python=3.10.16
+conda create -n longnav_vlm python=3.10.16
 ```
 
 Install with pip:
 ```
 pip install -e .
+pip install flash-attn --no-build-isolation
 ```
 
 Make sure that the verl submodule is installed. 
+```
+git submodule update --init --recursive
+cd verl && pip install --no-dependencies -e .
+```
 
-#### Note
-- verl has minor incompatibility with latest transformers. you may have to patch the verl code.
+You may optionally install flash attention in the same env.
+### Environment
+Install habitat lab in a separate conda env named vln. Then run:
+```
+pip install --no-dependencies -e .
+```
+This allows ray to resolve the interface correctly.
 
-- flash attention is supported, install is left as exercise to reader (wheel availability depends on machine)
 ### Testing the Install
 Two basic tests are currently available to validate your install:
 
@@ -33,7 +43,14 @@ python3 tests/rl_smoke.py
 ```
 
 These may be referenced for integrating new Envs.
-## Training 🚀
+
+## Quickstart
+Run our framework with a dummy environment (doesn't require habitat dependencies)
+```
+python3 -m longnav.training_scripts.train_dummy.py
+```
+## ObjectNav Training 🚀
+
 ```
 python3 -m longnav.training_scripts.train_rl.py +experiment=<experiment_name>
 ```

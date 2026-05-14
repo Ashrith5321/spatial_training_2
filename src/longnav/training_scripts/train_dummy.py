@@ -18,6 +18,9 @@ NOTE: tab completion only works if your command uses python not python3. somehow
 import os
 
 from verl.single_controller import ray
+
+from longnav.env.env_base import DummyEnvActor
+from longnav.env.color_bandit import ColorBanditEnvActor
 # NUCLEAR THREAD CAP: Must be set before importing numpy/torch/ray
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -35,6 +38,7 @@ import os
 
 DEBUG_FLAG = False
 FREEZE_DATA = False # for debugging only
+env_actor_cls = ColorBanditEnvActor
 # 1. Register our command variants
 register_configs()
 @hydra.main(version_base=None, config_name="rl_config",config_path='../conf')
@@ -81,7 +85,7 @@ def main(cfg: RLConfig):
         excluded_episodes = None
         wandb_actor = None
         
-    sims = bootstrapper.bootstrap_sims(wandb_actor)
+    sims = [ray.remote(env_actor_cls).remote() for _ in range(2)]
     # # 3. Prepare Data Shards (using simple helper)
     shard_iter = get_shard_iterator(
         subset_label= cfg.task.subset_label,

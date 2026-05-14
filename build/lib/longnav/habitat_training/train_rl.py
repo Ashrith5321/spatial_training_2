@@ -16,8 +16,6 @@ eval "$(python3 -m longnav.training_scripts.train_rl.py -sc install=bash)"
 NOTE: tab completion only works if your command uses python not python3. somehow.
 '''
 import os
-
-from verl.single_controller import ray
 # NUCLEAR THREAD CAP: Must be set before importing numpy/torch/ray
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -26,8 +24,11 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_ENABLE_PARALLEL_LOADING"] = "false"
+from pathlib import Path
 import sys
-
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 import hydra
 from longnav.conf.register_configs import register_configs
 from longnav.config_schema import RLConfig
@@ -35,6 +36,7 @@ import os
 
 DEBUG_FLAG = False
 FREEZE_DATA = False # for debugging only
+
 # 1. Register our command variants
 register_configs()
 @hydra.main(version_base=None, config_name="rl_config",config_path='../conf')
@@ -74,21 +76,16 @@ def main(cfg: RLConfig):
 
     bootstrapper.setup_cluster()
     trainers = bootstrapper.bootstrap_vlms_rl() #allocate vlms first to prevent out of room issues
-    wandb_objs = bootstrapper.bootstrap_logger()
-    if wandb_objs is not None:
-        wandb_actor,excluded_episodes = wandb_objs
-    else:
-        excluded_episodes = None
-        wandb_actor = None
-        
-    sims = bootstrapper.bootstrap_sims(wandb_actor)
+    wandb_actor,_ = bootstrapper.bootstrap_logger()
+    sim_logger = None
+    sims = bootstrapper.bootstrap_sims(sim_logger)
+
     # # 3. Prepare Data Shards (using simple helper)
     shard_iter = get_shard_iterator(
         subset_label= cfg.task.subset_label,
         episode_json= cfg.task.episode_json,
         shard_size=cfg.task.shard_size,
-        logger=logger,
-        excluded_episodes=excluded_episodes
+        logger=logger
     )
     trajectory_list = []
 
@@ -160,7 +157,7 @@ def main(cfg: RLConfig):
             adv_tuple = advantage_estimator_fn(
                 token_level_rewards=traj_batch['rewards'],
                 values=values,
-                # distances = distances,
+                distances = distances,
                 response_mask=traj_batch['response_mask'],
                 config = cfg.training.rl_config,
                 # gamma=config.get('gamma', 0.99), # Fallback defaults if not in config
@@ -251,8 +248,8 @@ def main(cfg: RLConfig):
                         rollout_stats = {
                             "rollout/ep_rew": traj_stats['rewards'].sum().item(),
                             "rollout/ep_len": valid_mask.sum().item(),
-                            # "rollout/success": traj_stats['success'].max().item(), 
-                            # "rollout/spl": traj_stats['spl'].max().item(),
+                            "rollout/success": traj_stats['success'].max().item(), 
+                            "rollout/spl": traj_stats['spl'].max().item(),
                             "rollout/ep_rtn": traj_stats['returns'].mean().item(),
                             "rollout/rtn_var": traj_stats['returns'].var().item(),
                             "rollout/global_cycle": global_cycle
@@ -282,8 +279,7 @@ def main(cfg: RLConfig):
                             logger.warning(f"Log file for rollout {rollout_idx} not ready (Sim Worker I/O Lag). Skipping detailed logs.")
                         except Exception as e:
                             logger.warning(f"Failed to read log file: {e}")
-                        if wandb_actor is not None:
-                            wandb_actor.log_row.remote(result)
+                        wandb_actor.log_row.remote(result)
                         completed_count += 1
                      
                         print(f"[{completed_count}/{total_tasks}] Complete. {result}")
@@ -293,7 +289,7 @@ def main(cfg: RLConfig):
             #------------------------------------ save checkpoint ------------------------------------
             steps_until_save = (global_cycle+1) % bootstrapper.typed_cfg.training.save_step
             if steps_until_save == 0:
-                print("saving checkpoiutsnt")
+                print("saving checkpoint")
                 ray.get(trainers[0].save_checkpoint_unsafe.remote(os.path.join(bootstrapper.typed_cfg.task.output_dir,bootstrapper.typed_cfg.task.run_name,"checkpoints",f"checkpoint_{global_cycle}")))
             else:
                 print(f"T-{steps_until_save} steps until checkpoint!")
