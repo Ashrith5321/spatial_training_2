@@ -47,6 +47,11 @@ class PrunedSFTTrainer(SFTTrainer):
         # (loss, outputs) = super(SFTTrainer,self).compute_loss(
         #     model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
         # )
+        # for k,v in inputs.items():
+        #     try:
+        #         print(f"{k}:{v.shape}")
+        #     except Exception as e:
+        #         print(f"failed for {k}: {e}")
         outputs = model(**inputs)
         loss = outputs['loss']
         # =========================================================================

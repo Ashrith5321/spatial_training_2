@@ -389,6 +389,7 @@ class Qwen3VLSparseForConditionalGeneration(Qwen3VLForConditionalGeneration):
         Example:
             TODO: Add example
         """
+        
         outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values,

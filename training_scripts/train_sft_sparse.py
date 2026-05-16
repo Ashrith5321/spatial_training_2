@@ -59,9 +59,9 @@ GRADIENT_CHECKPOINTING = True          # Standard for VLM/LLM training
 USE_FLASH_ATTN = True                  # Highly recommended for A100
 
 
-TRAIN_DATASET_DIR = None
+TRAIN_DATASET_DIR = "tccoin/navverse-benchmark"
 EVAL_DATASET_DIR = None
-OUTPUT_DIR = "./dump/uniform_400step"
+OUTPUT_DIR = "./dump/navverse_sft"
 EVAL_MAX_SAMPLES = 40
 
 def get_peak_memory_gb():
@@ -294,7 +294,7 @@ def main():
         train_dataset = load_dataset(args.train_dataset_dir, split="train", streaming=use_streaming)
         # IterableDataset needs .shuffle with buffer_size
         if use_streaming:
-            train_dataset = train_dataset.shuffle(seed=42, buffer_size=1000)
+            # train_dataset = train_dataset.shuffle(seed=42, buffer_size=)
             train_dataset = train_dataset.map(decode_image_sequence)
             # print(f"length of images in sample before dynamic resize: {len(next(iter(train_dataset))['images'])}")
             # train_dataset = train_dataset.map(dynamic_resize_transform, batched=True,batch_size=1)
@@ -302,12 +302,12 @@ def main():
             # new_features["images"] = Sequence(Image())
 
             # 3. Resize
-            train_dataset = train_dataset.map(
-                dynamic_resize_transform, 
-                batched=True, 
-                batch_size=1,
-                # features=new_features # Explicitly pass the new schema
-            )
+            # train_dataset = train_dataset.map(
+            #     dynamic_resize_transform, 
+            #     batched=True, 
+            #     batch_size=1,
+            #     # features=new_features # Explicitly pass the new schema
+            # )
             
             # print(f"length of images in sample after dynamic resize: {len(next(iter(train_dataset))['images'])}")
         else:
@@ -371,10 +371,10 @@ def main():
         output_dir=args.output_dir,
         # run_name="qwen-vln-action-dropout",
         save_strategy="steps",        # Save checkpoints frequently
-        save_steps=100,
+        save_steps=77,
                   # Save every 500 steps
         eval_strategy="steps" if eval_dataset is not None else "no",
-        eval_steps=100,               # Frequency: Every 100 steps
+        eval_steps=77,               # Frequency: Every 100 steps
         per_device_eval_batch_size=1,
         
         per_device_train_batch_size=BATCH_SIZE,
@@ -386,13 +386,13 @@ def main():
         bf16=True,     # Use bfloat16 for A100
         gradient_checkpointing=GRADIENT_CHECKPOINTING,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        max_steps=60000,   # We only need a few steps to hit peak memory
+        max_steps=1000,   # We only need a few steps to hit peak memory
         report_to="wandb",
         # dataset_text_field="text",
 
         resume_from_checkpoint=args.resume_path,
         assistant_only_loss=False,
-        optim="paged_adamw_8bit",
+        optim="adamw_torch_fused",
         dataloader_num_workers=2,
 
         remove_unused_columns=False,
